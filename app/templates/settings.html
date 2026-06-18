@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Settings</h1>
+<section class="panel">
+  <h2>Admin Password</h2>
+  <form method="post" action="/admin/settings">
+    <label for="new-admin-password">New password</label>
+    <input id="new-admin-password" name="password" type="password" required minlength="12">
+    <button type="submit">Change password</button>
+  </form>
+</section>
+<section class="panel">
+  <h2>Deployment</h2>
+  <p>Relay API: <code>/exa/*</code> and <code>/tavily/*</code></p>
+  <p>Health check: <code>/health</code></p>
+</section>
+{% endblock %}

@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Relay Keys</h1>
+{% if created %}
+<div class="notice">
+  New key. Copy it now because it will not be shown again:
+  <code>{{ created }}</code>
+</div>
+{% endif %}
+<section class="panel">
+  <h2>Create Key</h2>
+  <form method="post" action="/admin/relay-keys" class="form-row">
+    <input name="label" placeholder="Label" required>
+    <input name="daily_limit" placeholder="Daily limit, optional" inputmode="numeric">
+    <button type="submit">Create</button>
+  </form>
+</section>
+<section class="panel">
+  <h2>Existing Keys</h2>
+  <table>
+    <thead><tr><th>ID</th><th>Label</th><th>Status</th><th>Daily Limit</th><th>Action</th></tr></thead>
+    <tbody>
+      {% for key in keys %}
+      <tr>
+        <td>{{ key.id }}</td>
+        <td>{{ key.label }}</td>
+        <td>{% if key.enabled %}Enabled{% else %}Disabled{% endif %}</td>
+        <td>{{ key.daily_limit or "Unlimited" }}</td>
+        <td>
+          {% if key.enabled %}
+          <form method="post" action="/admin/relay-keys/{{ key.id }}/disable"><button type="submit">Disable</button></form>
+          {% else %}
+          <form method="post" action="/admin/relay-keys/{{ key.id }}/enable"><button type="submit">Enable</button></form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Request Logs</h1>
+<section class="panel">
+  <table>
+    <thead><tr><th>Time</th><th>Provider</th><th>Endpoint</th><th>Status</th><th>Latency</th><th>Error</th></tr></thead>
+    <tbody>
+      {% for log in logs %}
+      <tr>
+        <td>{{ log.created_at }}</td>
+        <td>{{ log.provider }}</td>
+        <td>{{ log.endpoint }}</td>
+        <td>{{ log.status_code }}</td>
+        <td>{{ log.duration_ms }} ms</td>
+        <td>{{ log.error_code or "" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

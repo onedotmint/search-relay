@@ -1,0 +1,12 @@
+services:
+  search-relay:
+    build: .
+    container_name: search-relay
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:${APP_PORT:-8080}:8080"
+      - "[::]:${APP_PORT:-8080}:8080"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title or "Search Relay" }}</title>
+  <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">Search Relay</div>
+    <nav>
+      <a href="/admin/dashboard">Dashboard</a>
+      <a href="/admin/providers">Providers</a>
+      <a href="/admin/relay-keys">Relay Keys</a>
+      <a href="/admin/logs">Logs</a>
+      <a href="/admin/settings">Settings</a>
+    </nav>
+    <form method="post" action="/admin/logout">
+      <button type="submit">Sign out</button>
+    </form>
+  </aside>
+  <main class="content">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

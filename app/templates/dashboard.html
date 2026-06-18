@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Dashboard</h1>
+<div class="stats">
+  <section class="panel"><span>Requests Today</span><strong>{{ metrics.requests_today }}</strong></section>
+  <section class="panel"><span>Success Rate</span><strong>{{ metrics.success_rate }}%</strong></section>
+  <section class="panel"><span>Average Latency</span><strong>{{ metrics.avg_duration_ms }} ms</strong></section>
+</div>
+<section class="panel">
+  <h2>Provider Usage</h2>
+  {% for item in metrics.by_provider %}
+  <p>{{ item.provider }}: {{ item.count }}</p>
+  {% else %}
+  <p class="muted">No requests today.</p>
+  {% endfor %}
+</section>
+<section class="panel">
+  <h2>Recent Failures</h2>
+  {% for log in logs if log.status_code >= 400 %}
+  <p>{{ log.created_at }} {{ log.provider }} {{ log.endpoint }} {{ log.status_code }} {{ log.error_code or "" }}</p>
+  {% else %}
+  <p class="muted">No recent failures.</p>
+  {% endfor %}
+</section>
+{% endblock %}

@@ -1,0 +1,17 @@
+.worktrees/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+data/
+*.sqlite3
+*.db
+*.egg-info/
+.server.pid
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+app/static_admin/*
+!app/static_admin/.gitkeep

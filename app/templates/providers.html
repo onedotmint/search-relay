@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Providers</h1>
+<div class="grid">
+  {% for provider in providers %}
+  <section class="panel">
+    <h2>{{ provider.name }}</h2>
+    <p>Status: {% if provider.enabled %}<strong>Enabled</strong>{% else %}<span class="muted">Disabled</span>{% endif %}</p>
+    <form method="post" action="/admin/providers/{{ provider.name }}">
+      <label for="{{ provider.name }}-api-key">API Key</label>
+      <input id="{{ provider.name }}-api-key" name="api_key" type="password" value="{{ provider.api_key or '' }}" autocomplete="off">
+      <label class="check"><input name="enabled" type="checkbox" {% if provider.enabled %}checked{% endif %}> Enabled</label>
+      <button type="submit">Save</button>
+    </form>
+  </section>
+  {% endfor %}
+</div>
+{% endblock %}

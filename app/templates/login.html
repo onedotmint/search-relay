@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin Login</title>
+  <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body class="login-page">
+  <form class="login-box" method="post" action="/admin/login">
+    <h1>Admin Login</h1>
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <label for="admin-password">Password</label>
+    <input id="admin-password" type="password" name="password" autofocus required>
+    <button type="submit">Sign in</button>
+  </form>
+</body>
+</html>
