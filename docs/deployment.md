@@ -95,12 +95,23 @@ Database migrations are additive and run during application startup.
 | `APP_HOST` | Bind host for local non-Docker runs |
 | `APP_PORT` | Published Docker port |
 | `APP_DATABASE_PATH` | SQLite database path |
-| `APP_SECRET_KEY` | Session signing key |
+| `APP_SECRET_KEY` | Session signing key (required for production; startup refuses a default key in production) |
+| `APP_ENV` | `development` (default) or `production` — production + default secret refuses startup |
 | `ADMIN_PASSWORD` | Initial admin password |
 | `UPSTREAM_TIMEOUT_SECONDS` | Provider request timeout |
+| `MAX_UPSTREAM_ATTEMPTS` | Total upstream attempts per relay request (default 3); caps retries regardless of key-pool size |
+| `REQUEST_LOG_RETENTION_DAYS` | Prune request_logs older than N days at startup (default 30) |
+| `COOKIE_SECURE` | Set the Secure flag on the admin session cookie; enable (`true`) when the admin UI is served over HTTPS |
 | `SEARCH_CACHE_ENABLED` | Default cache enabled state |
 | `SEARCH_CACHE_TTL_SECONDS` | Default cache TTL |
 | `SEARCH_CACHE_MAX_ROWS` | Default maximum cache rows |
+
+## Security Notes
+
+- `APP_ENV=production` with the default `APP_SECRET_KEY` refuses to start —
+  generate a strong key with `openssl rand -hex 32`.
+- Set `COOKIE_SECURE=true` whenever the admin UI is reachable over HTTPS
+  (any deployment behind a reverse proxy terminating TLS).
 
 ## Operations Checklist
 

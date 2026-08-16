@@ -6,6 +6,8 @@ from app.repositories import (
     create_provider_api_key,
     create_relay_key,
     clear_search_cache,
+    count_group_provider_requests_today,
+    count_key_requests_today,
     delete_search_cache,
     enforce_search_cache_max_rows,
     get_candidate_provider_api_keys,
@@ -22,6 +24,7 @@ from app.repositories import (
     list_relay_keys,
     list_search_cache_entries,
     prune_expired_search_cache,
+    prune_request_logs,
     recent_request_logs,
     record_request_log,
     search_cache_stats,
@@ -185,6 +188,7 @@ def test_init_db_migrates_grouped_schema_without_platform_columns(tmp_path):
     assert "exa_group_id" in relay_key_columns
     assert "tavily_group_id" in relay_key_columns
     assert "key_value" in relay_key_columns
+    assert "key_fingerprint" in relay_key_columns
     assert {(group["name"], group["platform"]) for group in groups} == {
         ("default", "exa"),
         ("tavily-default", "tavily"),
@@ -827,3 +831,80 @@ def test_search_cache_max_rows_removes_oldest_entries(tmp_path):
     assert removed == 1
     assert len(entries) == 2
     assert {entry["cache_key"] for entry in entries} == {"cache-key-1", "cache-key-2"}
+
+
+def test_init_db_creates_request_log_indexes(tmp_path):
+    db_path = tmp_path / "test.sqlite3"
+    with connect(str(db_path)) as conn:
+        init_db(conn)
+        index_rows = conn.execute("PRAGMA index_list(request_logs)").fetchall()
+        index_names = {row["name"] for row in index_rows}
+
+    assert {
+        "idx_request_logs_created_at",
+        "idx_request_logs_relay_key_id",
+        "idx_request_logs_provider_group_created",
+        "idx_request_logs_provider_created",
+    } <= index_names
+
+
+def test_daily_count_queries_use_request_log_index(tmp_path):
+    # Function-on-column predicates (date(created_at) = date('now')) cannot use
+    # an index; the rewrite to created_at >= start-of-day must. Locked here so
+    # the routing hot path stays index-backed as the table grows.
+    db_path = tmp_path / "test.sqlite3"
+    with connect(str(db_path)) as conn:
+        init_db(conn)
+        relay_key_id = create_relay_key(conn, "test", "hash", None)
+        group = create_group(conn, "pool-a", platform="exa")
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM request_logs "
+            "WHERE provider = 'exa' AND provider_group_id = 1 "
+            "AND created_at >= datetime('now', 'start of day')"
+        ).fetchall()
+        plan_text = " ".join(row["detail"] for row in plan)
+
+    assert "idx_request_logs_provider_group_created" in plan_text
+
+
+def test_prune_request_logs_removes_old_rows_only(tmp_path):
+    db_path = tmp_path / "test.sqlite3"
+    with connect(str(db_path)) as conn:
+        init_db(conn)
+        relay_key_id = create_relay_key(conn, "test", "hash", None)
+        record_request_log(conn, "exa", "/search", relay_key_id, 200, 5, 10, 20, None, None)
+        conn.execute(
+            "UPDATE request_logs SET created_at = datetime('now', '-40 days') "
+            "WHERE id = (SELECT MAX(id) FROM request_logs)"
+        )
+        record_request_log(conn, "exa", "/search", relay_key_id, 200, 5, 10, 20, None, None)
+
+        removed = prune_request_logs(conn, retention_days=30)
+        remaining = list_request_logs(conn, limit=10)
+
+    assert removed == 1
+    assert len(remaining) == 1
+
+
+def test_count_group_provider_requests_today_uses_start_of_day_rewrite(tmp_path):
+    # The rewritten predicate must still count today's rows (UTC) and ignore
+    # yesterday's, matching the old date(created_at) = date('now') semantics.
+    db_path = tmp_path / "test.sqlite3"
+    with connect(str(db_path)) as conn:
+        init_db(conn)
+        group = create_group(conn, "pool-a", platform="exa")
+        relay_key_id = create_relay_key(conn, "test", "hash", None)
+        record_request_log(
+            conn, "exa", "/search", relay_key_id, 200, 5, 10, 20, None, None,
+            provider_group_id=group, provider_group_name="pool-a",
+        )
+        conn.execute(
+            "UPDATE request_logs SET created_at = datetime('now', '-2 days') "
+            "WHERE id = (SELECT MAX(id) FROM request_logs)"
+        )
+
+        today_count = count_group_provider_requests_today(conn, "exa", group)
+        key_today = count_key_requests_today(conn, relay_key_id)
+
+    assert today_count == 0
+    assert key_today == 0

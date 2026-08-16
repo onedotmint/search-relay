@@ -45,6 +45,7 @@ from app.repositories import (
 )
 from app.security import (
     create_session_token,
+    fingerprint_secret,
     generate_relay_key,
     hash_secret,
     verify_secret,
@@ -356,6 +357,7 @@ def login_submit(request: Request, password: str = Form(...)):
         create_session_token({"admin": True}, request.app.state.settings.secret_key),
         httponly=True,
         samesite="lax",
+        secure=request.app.state.settings.cookie_secure,
         max_age=86400,
     )
     return response
@@ -423,7 +425,14 @@ def create_relay_key_route(
         return redirect
     raw_key = generate_relay_key()
     parsed_limit = int(daily_limit) if daily_limit.strip() else None
-    create_relay_key(request.app.state.db, label.strip(), hash_secret(raw_key), parsed_limit, key_value=raw_key)
+    create_relay_key(
+        request.app.state.db,
+        label.strip(),
+        hash_secret(raw_key),
+        parsed_limit,
+        key_value=raw_key,
+        key_fingerprint=fingerprint_secret(raw_key),
+    )
     return RedirectResponse(f"/admin/relay-keys?created={raw_key}", status_code=303)
 
 
@@ -483,6 +492,7 @@ def api_login(request: Request, payload: LoginPayload):
         create_session_token({"admin": True}, request.app.state.settings.secret_key),
         httponly=True,
         samesite="lax",
+        secure=request.app.state.settings.cookie_secure,
         max_age=86400,
     )
     return response
@@ -777,6 +787,7 @@ def api_create_relay_key(request: Request, payload: RelayKeyPayload):
         hash_secret(raw_key),
         payload.daily_limit,
         key_value=raw_key,
+        key_fingerprint=fingerprint_secret(raw_key),
         provider_groups=provider_groups,
         assign_default_groups=False,
     )

@@ -6,6 +6,7 @@ from dataclasses import replace
 import httpx
 
 from app.providers import PROVIDERS, AuthStrategy, RouteConfig
+from app.relay import find_relay_key
 from app.repositories import (
     create_provider,
     create_relay_key,
@@ -14,7 +15,7 @@ from app.repositories import (
     recent_request_logs,
     set_cache_settings,
 )
-from app.security import hash_secret
+from app.security import fingerprint_secret, hash_secret
 
 
 def add_relay_key(client, raw_key="relay_test_key", daily_limit=None):
@@ -48,6 +49,74 @@ def test_missing_relay_key_is_rejected(client):
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "relay_auth_failed"
+
+
+def add_fingerprinted_relay_key(client, raw_key="relay_fingerprint_key", daily_limit=None):
+    key_id = create_relay_key(
+        client.app.state.db,
+        "test",
+        hash_secret(raw_key),
+        daily_limit,
+        key_fingerprint=fingerprint_secret(raw_key),
+    )
+    return key_id, raw_key
+
+
+def test_find_relay_key_indexed_lookup_hit(client):
+    key_id, raw_key = add_fingerprinted_relay_key(client)
+
+    found = find_relay_key(client.app.state.db, raw_key)
+
+    assert found is not None
+    assert found["id"] == key_id
+
+
+def test_find_relay_key_indexed_lookup_rejects_wrong_value(client):
+    add_fingerprinted_relay_key(client, raw_key="relay_fingerprint_key")
+
+    # Same length/prefix, different value — must not authenticate even though
+    # its fingerprint collides with no stored row.
+    assert find_relay_key(client.app.state.db, "relay_fingerprint_key_x") is None
+
+
+def test_find_relay_key_legacy_key_fallback(client):
+    # Legacy keys (created before the fingerprint column) have NULL
+    # fingerprints and must keep authenticating through the fallback scan.
+    key_id, raw_key = add_relay_key(client)
+
+    found = find_relay_key(client.app.state.db, raw_key)
+
+    assert found is not None
+    assert found["id"] == key_id
+
+
+def test_find_relay_key_fingerprint_rows_excluded_from_legacy_scan(client):
+    # A fingerprinted key must be found via the index, not the fallback scan;
+    # scanning fingerprint-less rows only keeps the legacy path bounded.
+    fingerprint_key_id, fingerprint_raw = add_fingerprinted_relay_key(client, "relay_a")
+    legacy_key_id, legacy_raw = add_relay_key(client)
+
+    assert find_relay_key(client.app.state.db, legacy_raw)["id"] == legacy_key_id
+    assert find_relay_key(client.app.state.db, fingerprint_raw)["id"] == fingerprint_key_id
+
+
+def test_relay_auth_with_fingerprinted_key_success(client, monkeypatch):
+    _, raw_key = add_fingerprinted_relay_key(client)
+    create_provider(client.app.state.db, "exa", "exa-secret", True)
+
+    async def fake_post(self, url, content, headers):
+        return httpx.Response(200, json={"results": []})
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    response = client.post(
+        "/exa/search",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={"query": "ai"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"results": []}
 
 
 def test_provider_must_be_enabled(client):
@@ -1341,6 +1410,73 @@ def test_no_infinite_retry_when_all_keys_fail(client, monkeypatch):
     assert calls == 3
     assert response.status_code == 503
     assert response.json() == {"error": "temporary", "attempt": 3}
+
+
+def test_upstream_attempt_budget_caps_retries_below_pool_size(client, monkeypatch):
+    # 6 keys, all returning 503, default MAX_UPSTREAM_ATTEMPTS=3: the relay
+    # must stop after 3 upstream calls — the retry budget, not the pool size,
+    # bounds the retries.
+    _, raw_key = add_relay_key(client)
+    assert client.post("/api/admin/login", json={"password": "admin-test-password"}).status_code == 200
+    assert client.put("/api/admin/providers/exa", json={"enabled": True}).status_code == 200
+    for index in range(6):
+        assert client.post(
+            "/api/admin/providers/exa/keys",
+            json={"label": f"broken-{index}", "api_key": f"exa-broken-{index}"},
+        ).status_code == 200
+    calls = 0
+
+    async def fake_post(self, url, content, headers):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503, json={"error": "temporary"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    response = client.post(
+        "/exa/search?no_cache=true",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={"query": "ai"},
+    )
+
+    assert calls == 3
+    assert response.status_code == 503
+    assert response.json() == {"error": "temporary"}
+
+
+def test_upstream_attempt_budget_still_allows_key_specific_failover(client, monkeypatch):
+    # 401 is key-specific: within the attempt budget the relay still moves to
+    # the next key instead of giving up after the first bad key.
+    _, raw_key = add_relay_key(client)
+    assert client.post("/api/admin/login", json={"password": "admin-test-password"}).status_code == 200
+    assert client.put("/api/admin/providers/exa", json={"enabled": True}).status_code == 200
+    assert client.post(
+        "/api/admin/providers/exa/keys",
+        json={"label": "bad", "api_key": "exa-bad"},
+    ).status_code == 200
+    assert client.post(
+        "/api/admin/providers/exa/keys",
+        json={"label": "good", "api_key": "exa-good"},
+    ).status_code == 200
+    used_keys = []
+
+    async def fake_post(self, url, content, headers):
+        used_keys.append(headers["x-api-key"])
+        if headers["x-api-key"] == "exa-bad":
+            return httpx.Response(401, json={"error": "unauthorized"})
+        return httpx.Response(200, json={"results": [{"title": "ok"}]})
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    response = client.post(
+        "/exa/search?no_cache=true",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={"query": "ai"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"results": [{"title": "ok"}]}
+    assert used_keys == ["exa-bad", "exa-good"]
 
 
 def test_timeout_marks_error_and_fails_over(client, monkeypatch):

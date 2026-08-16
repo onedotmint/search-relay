@@ -78,6 +78,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             tavily_group_id INTEGER,
             key_value TEXT,
             key_hash TEXT NOT NULL UNIQUE,
+            key_fingerprint TEXT,
             enabled INTEGER NOT NULL DEFAULT 1,
             daily_limit INTEGER,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -165,6 +166,14 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE relay_keys ADD COLUMN tavily_group_id INTEGER")
     if "key_value" not in relay_columns:
         conn.execute("ALTER TABLE relay_keys ADD COLUMN key_value TEXT")
+    if "key_fingerprint" not in relay_columns:
+        # Indexed auth lookup (hardening release): nullable for legacy keys,
+        # which fall back to the scan path until rotated. SQLite cannot add a
+        # UNIQUE column via ALTER TABLE, so the constraint is a separate index.
+        conn.execute("ALTER TABLE relay_keys ADD COLUMN key_fingerprint TEXT")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_relay_keys_key_fingerprint ON relay_keys(key_fingerprint)"
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS relay_key_groups (
@@ -280,5 +289,16 @@ def init_db(conn: sqlite3.Connection) -> None:
         WHERE group_id IS NULL
         """,
         (default_group["id"], tavily_default_group["id"]),
+    )
+    # request_logs indexes — created after the additive column migrations above
+    # so legacy schemas (missing provider_group_id etc.) migrate first.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_relay_key_id ON request_logs(relay_key_id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_request_logs_provider_group_created "
+        "ON request_logs(provider, provider_group_id, created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_request_logs_provider_created ON request_logs(provider, created_at)"
     )
     conn.commit()

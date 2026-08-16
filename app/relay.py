@@ -24,7 +24,7 @@ from app.repositories import (
     record_request_log,
     store_search_cache,
 )
-from app.security import verify_secret
+from app.security import fingerprint_secret, verify_secret
 
 
 router = APIRouter()
@@ -150,7 +150,15 @@ def extract_relay_auth(request: Request, body: bytes) -> tuple[str | None, bytes
 
 
 def find_relay_key(conn, raw_key: str):
-    rows = conn.execute(
+    """Locate a relay key by fingerprint index, then confirm with PBKDF2.
+
+    Fast path: sha256 fingerprint → indexed lookup → exactly one PBKDF2
+    verify (down from O(N × PBKDF2)). Legacy keys created before the
+    fingerprint column existed are found via a bounded fallback scan that
+    only checks fingerprint-less rows; they migrate once rotated.
+    """
+    fingerprint = fingerprint_secret(raw_key)
+    row = conn.execute(
         """
         SELECT
             relay_keys.*,
@@ -161,10 +169,31 @@ def find_relay_key(conn, raw_key: str):
         FROM relay_keys
         LEFT JOIN groups AS exa_groups ON exa_groups.id = relay_keys.exa_group_id
         LEFT JOIN groups AS tavily_groups ON tavily_groups.id = relay_keys.tavily_group_id
-        WHERE relay_keys.enabled IN (0, 1)
+        WHERE relay_keys.key_fingerprint = ?
+          AND relay_keys.enabled IN (0, 1)
+        """,
+        (fingerprint,),
+    ).fetchone()
+    if row is not None and verify_secret(raw_key, row["key_hash"]):
+        return dict(row)
+
+    # Legacy fallback: only rows without a fingerprint (pre-migration keys).
+    # The index keeps this scan from touching fingerprint-ed rows.
+    for row in conn.execute(
         """
-    ).fetchall()
-    for row in rows:
+        SELECT
+            relay_keys.*,
+            exa_groups.name AS exa_group_name,
+            exa_groups.enabled AS exa_group_enabled,
+            tavily_groups.name AS tavily_group_name,
+            tavily_groups.enabled AS tavily_group_enabled
+        FROM relay_keys
+        LEFT JOIN groups AS exa_groups ON exa_groups.id = relay_keys.exa_group_id
+        LEFT JOIN groups AS tavily_groups ON tavily_groups.id = relay_keys.tavily_group_id
+        WHERE relay_keys.key_fingerprint IS NULL
+          AND relay_keys.enabled IN (0, 1)
+        """
+    ).fetchall():
         if verify_secret(raw_key, row["key_hash"]):
             return dict(row)
     return None
@@ -293,8 +322,17 @@ async def forward_request(request: Request, provider: str, endpoint: str) -> Res
     last_timeout_group: dict | None = None
     last_timeout_key_id: int | None = None
     last_timeout = False
+    # Total-upstream-attempt budget: caps retries regardless of key-pool size
+    # (e.g. 20 keys + dead upstream = at most max_attempts upstream calls, not
+    # 20). Key-specific failures (401/exhausted) still switch keys, but only
+    # inside this budget.
+    max_attempts = int(request.app.state.settings.max_upstream_attempts)
+    attempts = 0
+    budget_exhausted = False
 
     for group_candidate in group_candidates:
+        if budget_exhausted:
+            break
         group = group_candidate["group"]
         cache_key = None
         if route.cacheable and cache_settings["enabled"] and not no_cache:
@@ -325,6 +363,10 @@ async def forward_request(request: Request, provider: str, endpoint: str) -> Res
 
         async with httpx.AsyncClient(**http_client_kwargs(request, group)) as client:
             for provider_key in group_candidate["keys"]:
+                if attempts >= max_attempts:
+                    budget_exhausted = True
+                    break
+                attempts += 1
                 provider_key_id = int(provider_key["id"])
                 upstream = build_upstream_request(
                     provider,

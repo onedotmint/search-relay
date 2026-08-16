@@ -1,8 +1,12 @@
 import httpx
+import pytest
+from fastapi.testclient import TestClient
 
 from app import main
+from app.config import DEFAULT_SECRET_KEY
 from app.repositories import create_relay_key, record_request_log, store_search_cache
 from app.security import hash_secret
+
 
 
 def api_login(client, password="admin-test-password"):
@@ -39,6 +43,64 @@ def test_api_admin_login_and_me(client):
     me = client.get("/api/admin/me")
     assert me.status_code == 200
     assert me.json() == {"authenticated": True}
+
+
+def test_login_cookie_not_secure_by_default(client):
+    response = api_login(client)
+
+    assert response.status_code == 200
+    assert "Secure" not in response.headers["set-cookie"]
+
+
+def _fresh_app(monkeypatch, tmp_path, **env):
+    monkeypatch.setenv("APP_DATABASE_PATH", str(tmp_path / "t.sqlite3"))
+    monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
+    monkeypatch.setenv("ADMIN_PASSWORD", "admin-test-password")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    return main.create_app()
+
+
+def test_production_with_default_secret_refuses_startup(monkeypatch, tmp_path):
+    monkeypatch.setenv("APP_SECRET_KEY", DEFAULT_SECRET_KEY)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("APP_DATABASE_PATH", str(tmp_path / "t.sqlite3"))
+    monkeypatch.setenv("ADMIN_PASSWORD", "admin-test-password")
+
+    with pytest.raises(RuntimeError, match="APP_SECRET_KEY"):
+        main.create_app()
+
+
+def test_dev_with_default_secret_boots_with_warning(monkeypatch, tmp_path, caplog):
+    import logging
+
+    monkeypatch.setenv("APP_SECRET_KEY", DEFAULT_SECRET_KEY)
+    monkeypatch.setenv("APP_DATABASE_PATH", str(tmp_path / "t.sqlite3"))
+    monkeypatch.setenv("ADMIN_PASSWORD", "admin-test-password")
+
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        app = main.create_app()
+
+    assert any("APP_SECRET_KEY" in record.message for record in caplog.records)
+    with TestClient(app) as test_client:
+        assert test_client.get("/health").status_code == 200
+
+
+def test_cookie_secure_flag_is_set_when_enabled(monkeypatch, tmp_path):
+    app = _fresh_app(monkeypatch, tmp_path, COOKIE_SECURE="true")
+
+    with TestClient(app) as test_client:
+        response = test_client.post("/api/admin/login", json={"password": "admin-test-password"})
+
+    assert response.status_code == 200
+    assert "Secure" in response.headers["set-cookie"]
+
+
+def test_api_login_secure_flag_off_by_default_in_dev(client):
+    response = api_login(client)
+
+    assert response.status_code == 200
+    assert "Secure" not in response.headers["set-cookie"]
 
 
 def test_providers_list_includes_brave(client):

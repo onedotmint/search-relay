@@ -797,7 +797,7 @@ def count_group_provider_requests_today(conn: sqlite3.Connection, provider: str,
         FROM request_logs
         WHERE provider = ?
           AND provider_group_id = ?
-          AND date(created_at) = date('now')
+          AND created_at >= datetime('now', 'start of day')
         """,
         (provider, group_id),
     ).fetchone()
@@ -810,6 +810,7 @@ def create_relay_key(
     key_hash: str,
     daily_limit: int | None,
     key_value: str | None = None,
+    key_fingerprint: str | None = None,
     group_id: int | None = None,
     exa_group_id: int | None = None,
     tavily_group_id: int | None = None,
@@ -848,10 +849,10 @@ def create_relay_key(
     assigned_group_id = exa_group_id if group_id is None else group_id
     cursor = conn.execute(
         """
-        INSERT INTO relay_keys (label, group_id, exa_group_id, tavily_group_id, key_value, key_hash, daily_limit)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO relay_keys (label, group_id, exa_group_id, tavily_group_id, key_value, key_hash, key_fingerprint, daily_limit)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (label, assigned_group_id, exa_group_id, tavily_group_id, key_value, key_hash, daily_limit),
+        (label, assigned_group_id, exa_group_id, tavily_group_id, key_value, key_hash, key_fingerprint, daily_limit),
     )
     key_id = int(cursor.lastrowid)
     set_relay_key_groups(conn, key_id, "exa", normalized_exa_group_ids)
@@ -982,7 +983,7 @@ def count_key_requests_today(conn: sqlite3.Connection, relay_key_id: int) -> int
         SELECT COUNT(*) AS count
         FROM request_logs
         WHERE relay_key_id = ?
-          AND date(created_at) = date('now')
+          AND created_at >= datetime('now', 'start of day')
         """,
         (relay_key_id,),
     ).fetchone()
@@ -995,7 +996,7 @@ def count_group_requests_today(conn: sqlite3.Connection, group_id: int) -> int:
         SELECT COUNT(*) AS count
         FROM request_logs
         WHERE request_logs.provider_group_id = ?
-          AND date(request_logs.created_at) = date('now')
+          AND request_logs.created_at >= datetime('now', 'start of day')
         """,
         (group_id,),
     ).fetchone()
@@ -1047,6 +1048,24 @@ def record_request_log(
         ),
     )
     conn.commit()
+
+
+def prune_request_logs(conn: sqlite3.Connection, retention_days: int) -> int:
+    """Delete request_logs rows older than retention_days (UTC cutoff).
+
+    Returns the number of rows removed. Called once at startup to keep the
+    table bounded; retention is time-based so the (created_at) index applies.
+    """
+    normalized_days = max(int(retention_days), 1)
+    cursor = conn.execute(
+        """
+        DELETE FROM request_logs
+        WHERE created_at < datetime('now', '-' || ? || ' days')
+        """,
+        (normalized_days,),
+    )
+    conn.commit()
+    return int(cursor.rowcount)
 
 
 def recent_request_logs(conn: sqlite3.Connection, limit: int = 100) -> list[dict[str, Any]]:
@@ -1192,7 +1211,7 @@ def dashboard_metrics(conn: sqlite3.Connection) -> dict[str, Any]:
           SUM(CASE WHEN status_code BETWEEN 200 AND 399 THEN 1 ELSE 0 END) AS success,
           COALESCE(AVG(duration_ms), 0) AS avg_duration
         FROM request_logs
-        WHERE date(created_at) = date('now')
+        WHERE created_at >= datetime('now', 'start of day')
         """
     ).fetchone()
     by_provider = [
@@ -1201,7 +1220,7 @@ def dashboard_metrics(conn: sqlite3.Connection) -> dict[str, Any]:
             """
             SELECT provider, COUNT(*) AS count
             FROM request_logs
-            WHERE date(created_at) = date('now')
+            WHERE created_at >= datetime('now', 'start of day')
             GROUP BY provider
             ORDER BY count DESC
             """

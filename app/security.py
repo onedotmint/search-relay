@@ -25,6 +25,17 @@ def hash_secret(secret_value: str) -> str:
     return f"pbkdf2_sha256${HASH_ITERATIONS}${_b64(salt)}${_b64(digest)}"
 
 
+def fingerprint_secret(secret_value: str) -> str:
+    """Cheap deterministic fingerprint of a secret, used for indexed lookup.
+
+    The fingerprint is NOT a verifier: the relay always confirms a matched
+    row with PBKDF2 `verify_secret()`. It only turns the O(N) scan into an
+    indexed lookup. Relay keys are 256-bit random tokens, so the unsalted
+    SHA-256 fingerprint leaks nothing usable for offline guessing.
+    """
+    return "sha256$" + hashlib.sha256(secret_value.encode("utf-8")).hexdigest()
+
+
 def verify_secret(secret_value: str, encoded_hash: str) -> bool:
     try:
         algorithm, iterations, salt_b64, digest_b64 = encoded_hash.split("$", 3)

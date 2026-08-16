@@ -8,12 +8,13 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.admin import api_router as admin_api_router
-from app.config import load_settings
+from app.config import DEFAULT_SECRET_KEY, load_settings
 from app.db import connect, init_db
 from app.repositories import (
     count_eligible_provider_keys,
     get_setting,
     list_providers,
+    prune_request_logs,
     set_setting,
 )
 from app.relay import router as relay_router
@@ -37,9 +38,24 @@ def bootstrap_admin_password(app: FastAPI) -> None:
 def create_app() -> FastAPI:
     app = FastAPI(title="Search Relay Platform")
     app.state.settings = load_settings()
+    if app.state.settings.secret_key == DEFAULT_SECRET_KEY:
+        if app.state.settings.app_env in {"production", "prod"}:
+            raise RuntimeError(
+                "Refusing to start in production with the default APP_SECRET_KEY. "
+                "Set APP_SECRET_KEY to a strong random value (e.g. `openssl rand -hex 32`)."
+            )
+        logger.warning(
+            "APP_SECRET_KEY is still the default value; admin session cookies are signed "
+            "with a predictable key. Set APP_SECRET_KEY before deploying."
+        )
     app.state.db = connect(app.state.settings.database_path)
     init_db(app.state.db)
     bootstrap_admin_password(app)
+    # Bounded request_logs: prune rows older than the retention window once at
+    # startup (time-based, uses the created_at index).
+    removed = prune_request_logs(app.state.db, app.state.settings.request_log_retention_days)
+    if removed:
+        logger.info("Pruned %d request_logs rows older than %d days", removed, app.state.settings.request_log_retention_days)
 
     @app.get("/health")
     def health() -> dict[str, Any]:

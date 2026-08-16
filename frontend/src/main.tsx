@@ -668,12 +668,12 @@ function Providers() {
       )
     },
     {
-      title: "Quota",
+      title: "Request Budget",
       width: 180,
       render: (_, key) => (
         <Space direction="vertical" size={0}>
-          <Text>{key.used_quota} / {key.total_quota}</Text>
-          <Text type="secondary">{key.remaining_quota} remaining</Text>
+          <Text>{key.used_quota} / {key.total_quota} requests</Text>
+          <Text type="secondary">{key.remaining_quota} requests remaining</Text>
         </Space>
       )
     },
@@ -824,7 +824,7 @@ function Providers() {
           >
             <Input.Password placeholder={editingKey ? "Leave blank to keep existing key" : "Upstream API key"} />
           </Form.Item>
-          <Form.Item name="total_quota" label="Total Quota" rules={[{ required: true, message: "Quota is required" }]}>
+          <Form.Item name="total_quota" label="Local Request Budget" rules={[{ required: true, message: "Request budget is required" }]}>
             <InputNumber min={1} className="full-width-input" />
           </Form.Item>
           <Form.Item name="enabled" label="Enabled" valuePropName="checked">

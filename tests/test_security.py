@@ -2,6 +2,7 @@ import pytest
 
 from app.security import (
     create_session_token,
+    fingerprint_secret,
     generate_relay_key,
     hash_secret,
     verify_secret,
@@ -36,3 +37,25 @@ def test_session_token_rejects_wrong_secret():
 
     with pytest.raises(ValueError):
         verify_session_token(token, secret_key="different")
+
+
+def test_fingerprint_secret_is_deterministic_and_prefixed():
+    fp1 = fingerprint_secret("relay_key_abc")
+    fp2 = fingerprint_secret("relay_key_abc")
+
+    assert fp1 == fp2
+    assert fp1.startswith("sha256$")
+    assert len(fp1) == len("sha256$") + 64
+
+
+def test_fingerprint_secret_differs_per_value():
+    assert fingerprint_secret("relay_key_abc") != fingerprint_secret("relay_key_abd")
+
+
+def test_fingerprint_does_not_replace_hash_verification():
+    raw_key = "relay_fingerprint_test"
+    hashed = hash_secret(raw_key)
+
+    # The fingerprint must never be used as the verifier itself.
+    assert fingerprint_secret(raw_key) != hashed
+    assert verify_secret(raw_key, hashed)

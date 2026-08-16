@@ -108,6 +108,25 @@ npm --prefix frontend run build
 
 Docker builds compile the React admin console and copy the generated files into `app/static_admin`.
 
+## Benchmarks
+
+Run the concurrency + large-payload benchmark against a local mock upstream
+(no real provider keys needed):
+
+```bash
+python scripts/benchmark.py
+```
+
+It reports p50/p95/p99 latency, requests/sec and failures at 1/10/50/100
+concurrent relay requests, plus a payload ladder from 100 KB to 20 MB.
+
+**Decision rule:** SQLite (single connection, WAL-free) is the deliberate
+architecture for this workload. Only if the benchmark shows failures or
+`database is locked` errors should you investigate WAL mode, `busy_timeout`,
+or connection management — otherwise do **not** change the database
+architecture. Large responses are buffered in memory by design; re-evaluate
+only if real payloads consistently exceed the ladder's largest sizes.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and change the secrets before exposing the service:
@@ -115,8 +134,12 @@ Copy `.env.example` to `.env` and change the secrets before exposing the service
 ```env
 APP_DATABASE_PATH=/app/data/search-relay.sqlite3
 APP_SECRET_KEY=replace-with-openssl-rand-hex-32
+APP_ENV=development
 ADMIN_PASSWORD=replace-on-first-deploy
 UPSTREAM_TIMEOUT_SECONDS=60
+MAX_UPSTREAM_ATTEMPTS=3
+REQUEST_LOG_RETENTION_DAYS=30
+COOKIE_SECURE=false
 SEARCH_CACHE_ENABLED=true
 SEARCH_CACHE_TTL_SECONDS=43200
 SEARCH_CACHE_MAX_ROWS=10000
@@ -124,7 +147,9 @@ SEARCH_CACHE_MAX_ROWS=10000
 
 Production recommendations:
 
-- Use a long random `APP_SECRET_KEY`.
+- Use a long random `APP_SECRET_KEY`; set `APP_ENV=production` so startup
+  refuses a default key.
+- Set `COOKIE_SECURE=true` when the admin UI is served over HTTPS.
 - Change the admin password after first login.
 - Put Search Relay behind HTTPS.
 - Do not share upstream Exa, Tavily, Brave, or Jina keys with downstream clients.
