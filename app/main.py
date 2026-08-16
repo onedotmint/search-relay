@@ -8,7 +8,11 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.admin import api_router as admin_api_router
-from app.config import DEFAULT_SECRET_KEY, load_settings
+from app.config import (
+    KNOWN_PLACEHOLDER_ADMIN_PASSWORDS,
+    KNOWN_PLACEHOLDER_SECRETS,
+    load_settings,
+)
 from app.db import connect, init_db
 from app.repositories import (
     count_eligible_provider_keys,
@@ -38,17 +42,35 @@ def bootstrap_admin_password(app: FastAPI) -> None:
 def create_app() -> FastAPI:
     app = FastAPI(title="Search Relay Platform")
     app.state.settings = load_settings()
-    if app.state.settings.secret_key == DEFAULT_SECRET_KEY:
-        if app.state.settings.app_env in {"production", "prod"}:
+    settings = app.state.settings
+    production = settings.app_env in {"production", "prod"}
+    if production:
+        # Fail safer: the placeholders shipped in .env.example are public
+        # knowledge (the repo is public). Refuse to boot with any of them so
+        # a forgetful deployer cannot run with a forgeable session key or a
+        # known admin password.
+        problems: list[str] = []
+        if settings.secret_key in KNOWN_PLACEHOLDER_SECRETS:
+            problems.append("APP_SECRET_KEY is a known placeholder")
+        if settings.admin_password and settings.admin_password in KNOWN_PLACEHOLDER_ADMIN_PASSWORDS:
+            problems.append("ADMIN_PASSWORD is a known placeholder")
+        if problems:
             raise RuntimeError(
-                "Refusing to start in production with the default APP_SECRET_KEY. "
-                "Set APP_SECRET_KEY to a strong random value (e.g. `openssl rand -hex 32`)."
+                "Refusing to start in production: "
+                + "; ".join(problems)
+                + ". Set strong random values (e.g. `openssl rand -hex 32` for the secret key)."
             )
-        logger.warning(
-            "APP_SECRET_KEY is still the default value; admin session cookies are signed "
-            "with a predictable key. Set APP_SECRET_KEY before deploying."
-        )
-    app.state.db = connect(app.state.settings.database_path)
+    else:
+        if settings.secret_key in KNOWN_PLACEHOLDER_SECRETS:
+            logger.warning(
+                "APP_SECRET_KEY is a known placeholder; admin session cookies are signed "
+                "with a predictable key. Set APP_SECRET_KEY before deploying."
+            )
+        if settings.admin_password and settings.admin_password in KNOWN_PLACEHOLDER_ADMIN_PASSWORDS:
+            logger.warning(
+                "ADMIN_PASSWORD is a known placeholder; use a strong random password before deploying."
+            )
+    app.state.db = connect(settings.database_path)
     init_db(app.state.db)
     bootstrap_admin_password(app)
     # Bounded request_logs: prune rows older than the retention window once at

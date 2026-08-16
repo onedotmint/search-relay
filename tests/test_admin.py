@@ -71,6 +71,36 @@ def test_production_with_default_secret_refuses_startup(monkeypatch, tmp_path):
         main.create_app()
 
 
+def test_production_with_placeholder_secret_refuses_startup(monkeypatch, tmp_path):
+    # The .env.example placeholder is public knowledge — production must not
+    # boot with it, even though it is not the literal dev default.
+    monkeypatch.setenv("APP_SECRET_KEY", "replace-with-openssl-rand-hex-32")
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("APP_DATABASE_PATH", str(tmp_path / "t.sqlite3"))
+    monkeypatch.setenv("ADMIN_PASSWORD", "admin-test-password")
+
+    with pytest.raises(RuntimeError, match="APP_SECRET_KEY"):
+        main.create_app()
+
+
+def test_production_with_placeholder_admin_password_refuses_startup(monkeypatch, tmp_path):
+    # Same class of exposure: the example ADMIN_PASSWORD is publicly known.
+    monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("APP_DATABASE_PATH", str(tmp_path / "t.sqlite3"))
+    monkeypatch.setenv("ADMIN_PASSWORD", "replace-on-first-deploy")
+
+    with pytest.raises(RuntimeError, match="ADMIN_PASSWORD"):
+        main.create_app()
+
+
+def test_production_with_real_secrets_boots(monkeypatch, tmp_path):
+    app = _fresh_app(monkeypatch, tmp_path, APP_ENV="production")
+
+    with TestClient(app) as test_client:
+        assert test_client.get("/health").status_code == 200
+
+
 def test_dev_with_default_secret_boots_with_warning(monkeypatch, tmp_path, caplog):
     import logging
 

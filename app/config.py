@@ -3,6 +3,24 @@ from dataclasses import dataclass
 
 DEFAULT_SECRET_KEY = "dev-secret-change-me"
 
+# Placeholder values shipped in .env.example. They are public knowledge (the
+# repo is public), so production must refuse to start with any of them; dev
+# downgrades to a warning. Exact-match only — a user's real strong value is
+# never caught here.
+KNOWN_PLACEHOLDER_SECRETS = frozenset(
+    {
+        "dev-secret-change-me",
+        "replace-with-openssl-rand-hex-32",
+        "replace-with-a-long-random-secret",
+    }
+)
+KNOWN_PLACEHOLDER_ADMIN_PASSWORDS = frozenset(
+    {
+        "replace-on-first-deploy",
+        "replace-with-a-strong-password",
+    }
+)
+
 
 def _bool_env(name: str, default: bool) -> bool:
     return os.getenv(name, "true" if default else "false").strip().lower() in {"1", "true", "yes", "on"}

@@ -6,23 +6,14 @@ Create an environment file:
 
 ```bash
 cp .env.example .env
+nano .env   # set APP_SECRET_KEY / ADMIN_PASSWORD to real random values
 ```
 
-Edit `.env`:
+The example ships with `APP_ENV=production`; production refuses to start
+with the placeholder secret/password values, so the copy must be edited
+before the first `up`.
 
-```env
-APP_HOST=0.0.0.0
-APP_PORT=8080
-APP_DATABASE_PATH=/app/data/search-relay.sqlite3
-APP_SECRET_KEY=replace-with-openssl-rand-hex-32
-ADMIN_PASSWORD=replace-on-first-deploy
-UPSTREAM_TIMEOUT_SECONDS=60
-SEARCH_CACHE_ENABLED=true
-SEARCH_CACHE_TTL_SECONDS=43200
-SEARCH_CACHE_MAX_ROWS=10000
-```
-
-Start:
+Start (builds the image from the local source, then runs it):
 
 ```bash
 docker compose up -d --build
@@ -95,9 +86,9 @@ Database migrations are additive and run during application startup.
 | `APP_HOST` | Bind host for local non-Docker runs |
 | `APP_PORT` | Published Docker port |
 | `APP_DATABASE_PATH` | SQLite database path |
-| `APP_SECRET_KEY` | Session signing key (required for production; startup refuses a default key in production) |
-| `APP_ENV` | `development` (default) or `production` — production + default secret refuses startup |
-| `ADMIN_PASSWORD` | Initial admin password |
+| `APP_SECRET_KEY` | Session signing key; production refuses to start with a known placeholder value |
+| `APP_ENV` | `development` (default) or `production` — production refuses startup with placeholder secrets/passwords (`.env.example` values are public knowledge) |
+| `ADMIN_PASSWORD` | Initial admin password; same placeholder guard as the secret key |
 | `UPSTREAM_TIMEOUT_SECONDS` | Provider request timeout |
 | `MAX_UPSTREAM_ATTEMPTS` | Total upstream attempts per relay request (default 3); caps retries regardless of key-pool size |
 | `REQUEST_LOG_RETENTION_DAYS` | Prune request_logs older than N days at startup (default 30) |
@@ -108,10 +99,10 @@ Database migrations are additive and run during application startup.
 
 ## Security Notes
 
-- `APP_ENV=production` with the default `APP_SECRET_KEY` refuses to start —
-  generate a strong key with `openssl rand -hex 32`.
-- Set `COOKIE_SECURE=true` whenever the admin UI is reachable over HTTPS
-  (any deployment behind a reverse proxy terminating TLS).
+- `APP_ENV=production` refuses to start when `APP_SECRET_KEY` or
+  `ADMIN_PASSWORD` is one of the known placeholder strings shipped in
+  `.env.example` (they are public knowledge — the repo is public).
+  Generate a real key with `openssl rand -hex 32` and a strong password.
 
 ## Operations Checklist
 

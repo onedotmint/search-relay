@@ -36,6 +36,7 @@ The upstream key pool exists for credential rotation, project/environment isolat
 
 ```bash
 cp .env.example .env
+nano .env   # set APP_SECRET_KEY / ADMIN_PASSWORD to real random values
 docker compose up -d --build
 ```
 
@@ -129,17 +130,21 @@ only if real payloads consistently exceed the ladder's largest sizes.
 
 ## Configuration
 
-Copy `.env.example` to `.env` and change the secrets before exposing the service:
+Copy `.env.example` to `.env` and change the secrets before exposing the service
+(the example defaults to `APP_ENV=production`, which refuses to start with
+placeholder secrets):
 
 ```env
+APP_HOST=0.0.0.0
+APP_PORT=8080
+APP_ENV=production
 APP_DATABASE_PATH=/app/data/search-relay.sqlite3
-APP_SECRET_KEY=replace-with-openssl-rand-hex-32
-APP_ENV=development
-ADMIN_PASSWORD=replace-on-first-deploy
+APP_SECRET_KEY=replace-with-a-long-random-secret
+ADMIN_PASSWORD=replace-with-a-strong-password
+COOKIE_SECURE=true
 UPSTREAM_TIMEOUT_SECONDS=60
 MAX_UPSTREAM_ATTEMPTS=3
 REQUEST_LOG_RETENTION_DAYS=30
-COOKIE_SECURE=false
 SEARCH_CACHE_ENABLED=true
 SEARCH_CACHE_TTL_SECONDS=43200
 SEARCH_CACHE_MAX_ROWS=10000
@@ -147,8 +152,9 @@ SEARCH_CACHE_MAX_ROWS=10000
 
 Production recommendations:
 
-- Use a long random `APP_SECRET_KEY`; set `APP_ENV=production` so startup
-  refuses a default key.
+- Use a long random `APP_SECRET_KEY` and a strong `ADMIN_PASSWORD`;
+  `APP_ENV=production` refuses to start with the placeholder values from
+  `.env.example` (they are public knowledge).
 - Set `COOKIE_SECURE=true` when the admin UI is served over HTTPS.
 - Change the admin password after first login.
 - Put Search Relay behind HTTPS.
