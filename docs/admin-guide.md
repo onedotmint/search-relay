@@ -38,13 +38,13 @@ socks5h://proxy.example.com:1080
 
 Use `socks5h://` when DNS resolution should happen through the proxy.
 
-## Platform Keys
+## Upstream Keys
 
-Platform Keys are real upstream API keys from Exa or Tavily.
+Upstream Keys are real upstream API keys from Exa, Tavily, Brave, or Jina.
 
 Fields:
 
-- `Platform`: upstream provider.
+- `Provider`: upstream provider.
 - `Group`: matching provider group.
 - `Label`: admin-friendly name.
 - `API Key`: upstream key.

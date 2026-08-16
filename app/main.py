@@ -1,6 +1,7 @@
 import logging
 import secrets
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, RedirectResponse, Response
@@ -9,7 +10,12 @@ from fastapi.staticfiles import StaticFiles
 from app.admin import api_router as admin_api_router
 from app.config import load_settings
 from app.db import connect, init_db
-from app.repositories import get_setting, set_setting
+from app.repositories import (
+    count_eligible_provider_keys,
+    get_setting,
+    list_providers,
+    set_setting,
+)
 from app.relay import router as relay_router
 from app.security import hash_secret
 
@@ -36,8 +42,18 @@ def create_app() -> FastAPI:
     bootstrap_admin_password(app)
 
     @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok"}
+    def health() -> dict[str, Any]:
+        # Two tiers: service liveness (top-level status) and per-provider
+        # configuration status (configured + eligible upstream key count).
+        # Cheap DB reads only — no upstream calls on ordinary health checks.
+        providers = {
+            str(row["name"]): {
+                "configured": int(row["enabled"]) == 1,
+                "eligible_keys": count_eligible_provider_keys(app.state.db, str(row["name"])),
+            }
+            for row in list_providers(app.state.db)
+        }
+        return {"status": "ok", "providers": providers}
 
     app.mount("/static", StaticFiles(directory="app/static"), name="static")
     if (ADMIN_STATIC_DIR / "assets").exists():

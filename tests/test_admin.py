@@ -41,6 +41,87 @@ def test_api_admin_login_and_me(client):
     assert me.json() == {"authenticated": True}
 
 
+def test_providers_list_includes_brave(client):
+    assert api_login(client).status_code == 200
+
+    providers = client.get("/api/admin/providers").json()["providers"]
+    names = [provider["name"] for provider in providers]
+
+    # Brave is seeded from the registry alongside exa/tavily.
+    assert "brave" in names
+    brave = next(provider for provider in providers if provider["name"] == "brave")
+    assert brave["base_url"] == "https://api.search.brave.com"
+    assert brave["enabled"] is False
+    assert brave["has_api_key"] is False
+    assert brave["upstream_key_count"] == 0
+
+    # Enabling brave + adding a group/key works through the generic admin API.
+    assert client.put("/api/admin/providers/brave", json={"enabled": True}).status_code == 200
+    group = client.post(
+        "/api/admin/groups",
+        json={"name": "brave-admin", "platform": "brave", "enabled": True},
+    ).json()["group"]
+    assert group["platform"] == "brave"
+    assert client.post(
+        "/api/admin/providers/brave/keys",
+        json={"label": "admin-key", "api_key": "brave-admin-secret", "group_id": group["id"]},
+    ).status_code == 200
+
+    updated = client.get("/api/admin/providers").json()["providers"]
+    brave = next(provider for provider in updated if provider["name"] == "brave")
+    assert brave["enabled"] is True
+    assert brave["has_api_key"] is True
+    assert brave["upstream_key_count"] == 1
+
+
+def test_providers_list_includes_jina(client):
+    assert api_login(client).status_code == 200
+
+    providers = client.get("/api/admin/providers").json()["providers"]
+    names = [provider["name"] for provider in providers]
+
+    # Jina is seeded from the registry alongside exa/tavily/brave.
+    assert "jina" in names
+    jina = next(provider for provider in providers if provider["name"] == "jina")
+    assert jina["base_url"] == "https://r.jina.ai"
+    assert jina["enabled"] is False
+    assert jina["has_api_key"] is False
+    assert jina["upstream_key_count"] == 0
+
+    # Enabling jina + adding a group/key works through the generic admin API.
+    assert client.put("/api/admin/providers/jina", json={"enabled": True}).status_code == 200
+    group = client.post(
+        "/api/admin/groups",
+        json={"name": "jina-admin", "platform": "jina", "enabled": True},
+    ).json()["group"]
+    assert group["platform"] == "jina"
+    assert client.post(
+        "/api/admin/providers/jina/keys",
+        json={"label": "admin-key", "api_key": "jina-admin-secret", "group_id": group["id"]},
+    ).status_code == 200
+
+    updated = client.get("/api/admin/providers").json()["providers"]
+    jina = next(provider for provider in updated if provider["name"] == "jina")
+    assert jina["enabled"] is True
+    assert jina["has_api_key"] is True
+    assert jina["upstream_key_count"] == 1
+
+
+def test_admin_provider_list_is_dynamic_and_complete(client):
+    """The admin provider list is dynamic and contains all four V1 providers.
+
+    The frontend derives its provider selectors from this endpoint, so it must
+    list exactly the registry-seeded providers (no frontend hardcode needed).
+    """
+    assert api_login(client).status_code == 200
+
+    providers = client.get("/api/admin/providers").json()["providers"]
+    names = [provider["name"] for provider in providers]
+
+    assert names == ["brave", "exa", "jina", "tavily"]
+    assert all("base_url" in provider for provider in providers)
+
+
 def test_api_admin_wrong_password_is_rejected(client):
     response = api_login(client, "wrong")
 
@@ -508,6 +589,116 @@ def test_api_admin_rejects_invalid_external_key_group(client):
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "group_not_found"
+
+
+def test_api_create_relay_key_with_provider_groups_payload(client):
+    assert api_login(client).status_code == 200
+    exa_group = client.post("/api/admin/groups", json={"name": "exa-pg", "platform": "exa"}).json()["group"]
+
+    response = client.post(
+        "/api/admin/relay-keys",
+        json={"label": "pg-client", "provider_groups": {"exa": [exa_group["id"]]}},
+    )
+
+    assert response.status_code == 200
+    record = response.json()["record"]
+    assert [group["id"] for group in record["provider_groups"]["exa"]] == [exa_group["id"]]
+    assert record["exa_group_id"] == exa_group["id"]
+
+
+def test_api_relay_key_public_includes_provider_groups(client):
+    assert api_login(client).status_code == 200
+    exa_group = client.post("/api/admin/groups", json={"name": "exa-pub", "platform": "exa"}).json()["group"]
+    tavily_group = client.post(
+        "/api/admin/groups", json={"name": "tavily-pub", "platform": "tavily"}
+    ).json()["group"]
+
+    created = client.post(
+        "/api/admin/relay-keys",
+        json={
+            "label": "pub-client",
+            "provider_groups": {"exa": [exa_group["id"]], "tavily": [tavily_group["id"]]},
+        },
+    ).json()["record"]
+
+    keys = client.get("/api/admin/relay-keys").json()["relay_keys"]
+    listed = next(key for key in keys if key["id"] == created["id"])
+    assert [group["id"] for group in listed["provider_groups"]["exa"]] == [exa_group["id"]]
+    assert [group["id"] for group in listed["provider_groups"]["tavily"]] == [tavily_group["id"]]
+    assert [group["id"] for group in listed["exa_groups"]] == [exa_group["id"]]
+
+
+def test_api_update_relay_key_with_provider_groups(client):
+    assert api_login(client).status_code == 200
+    exa_group = client.post("/api/admin/groups", json={"name": "exa-up", "platform": "exa"}).json()["group"]
+    tavily_group = client.post(
+        "/api/admin/groups", json={"name": "tavily-up", "platform": "tavily"}
+    ).json()["group"]
+
+    created = client.post(
+        "/api/admin/relay-keys",
+        json={"label": "up-client", "provider_groups": {"exa": [exa_group["id"]]}},
+    ).json()["record"]
+
+    update = client.put(
+        f"/api/admin/relay-keys/{created['id']}",
+        json={
+            "label": "up-client",
+            "provider_groups": {"exa": [exa_group["id"]], "tavily": [tavily_group["id"]]},
+            "enabled": True,
+        },
+    )
+
+    assert update.status_code == 200
+    updated = update.json()["relay_key"]
+    assert [group["id"] for group in updated["provider_groups"]["exa"]] == [exa_group["id"]]
+    assert [group["id"] for group in updated["provider_groups"]["tavily"]] == [tavily_group["id"]]
+
+
+def test_api_provider_groups_override_legacy_fields(client):
+    assert api_login(client).status_code == 200
+    exa_a = client.post("/api/admin/groups", json={"name": "exa-a", "platform": "exa"}).json()["group"]
+    exa_b = client.post("/api/admin/groups", json={"name": "exa-b", "platform": "exa"}).json()["group"]
+
+    response = client.post(
+        "/api/admin/relay-keys",
+        json={
+            "label": "override",
+            "exa_group_id": exa_a["id"],
+            "provider_groups": {"exa": [exa_b["id"]]},
+        },
+    )
+
+    assert response.status_code == 200
+    record = response.json()["record"]
+    assert [group["id"] for group in record["provider_groups"]["exa"]] == [exa_b["id"]]
+
+
+def test_api_rejects_unknown_provider_in_provider_groups_payload(client):
+    assert api_login(client).status_code == 200
+
+    response = client.post(
+        "/api/admin/relay-keys",
+        json={"label": "bad-provider", "provider_groups": {"nope": [1]}},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "provider_not_found"
+
+
+def test_api_rejects_wrong_platform_group_in_provider_groups_payload(client):
+    assert api_login(client).status_code == 200
+    tavily_group = client.post(
+        "/api/admin/groups", json={"name": "tavily-wrong", "platform": "tavily"}
+    ).json()["group"]
+
+    response = client.post(
+        "/api/admin/relay-keys",
+        json={"label": "mismatch", "provider_groups": {"exa": [tavily_group["id"]]}},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "group_platform_mismatch"
 
 
 def test_api_admin_rejects_empty_external_key_label(client):

@@ -3,9 +3,13 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app.providers import provider_base_url
+
 DEFAULT_GROUP_NAMES = {
     "exa": "default",
     "tavily": "tavily-default",
+    "brave": "brave-default",
+    "jina": "jina-default",
 }
 
 
@@ -39,7 +43,7 @@ def get_provider(conn: sqlite3.Connection, name: str) -> dict[str, Any] | None:
 
 
 def create_provider(conn: sqlite3.Connection, name: str, api_key: str, enabled: bool) -> None:
-    base_url = "https://api.exa.ai" if name == "exa" else "https://api.tavily.com"
+    base_url = provider_base_url(name)
     api_key = api_key.strip()
     group_id = get_default_group_id(conn, name)
     conn.execute(
@@ -260,6 +264,27 @@ def get_candidate_provider_api_keys(
             params,
         ).fetchall()
     ]
+
+
+def count_eligible_provider_keys(conn: sqlite3.Connection, provider_name: str) -> int:
+    """Number of usable upstream keys for a provider (cheap DB count).
+
+    Eligible = enabled, not marked invalid, and with remaining quota. Used by
+    the /health endpoint; deliberately does not require the provider row to be
+    enabled so health can report key inventory independently of configuration.
+    """
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM provider_api_keys
+        WHERE provider_name = ?
+          AND enabled = 1
+          AND is_invalid = 0
+          AND used_quota < total_quota
+        """,
+        (provider_name,),
+    ).fetchone()
+    return int(row["count"] or 0)
 
 
 def mark_provider_api_key_used(conn: sqlite3.Connection, key_id: int) -> None:
@@ -677,14 +702,22 @@ def set_group_enabled(conn: sqlite3.Connection, group_id: int, enabled: bool) ->
     conn.commit()
 
 
-def set_relay_key_groups(
+def set_relay_key_provider_groups(
     conn: sqlite3.Connection,
     relay_key_id: int,
     provider: str,
     group_ids: list[int] | tuple[int, ...] | None,
 ) -> None:
+    """Canonical provider-group binding write for one provider.
+
+    Writes only to relay_key_groups (delete + reinsert with priority). No
+    legacy relay_keys column side effects — those live in set_relay_key_groups.
+    """
     normalized = normalize_group_ids(group_ids)
-    conn.execute("DELETE FROM relay_key_groups WHERE relay_key_id = ? AND provider = ?", (relay_key_id, provider))
+    conn.execute(
+        "DELETE FROM relay_key_groups WHERE relay_key_id = ? AND provider = ?",
+        (relay_key_id, provider),
+    )
     for priority, group_id in enumerate(normalized):
         conn.execute(
             """
@@ -693,6 +726,23 @@ def set_relay_key_groups(
             """,
             (relay_key_id, provider, group_id, priority),
         )
+    conn.commit()
+
+
+def set_relay_key_groups(
+    conn: sqlite3.Connection,
+    relay_key_id: int,
+    provider: str,
+    group_ids: list[int] | tuple[int, ...] | None,
+) -> None:
+    """Legacy-compat wrapper around the generic binding write.
+
+    For exa/tavily only, mirrors the first bound group into the legacy
+    relay_keys.group_id / exa_group_id / tavily_group_id columns so older
+    readers keep working. New providers never touch those columns.
+    """
+    set_relay_key_provider_groups(conn, relay_key_id, provider, group_ids)
+    normalized = normalize_group_ids(group_ids)
     first_group_id = normalized[0] if normalized else None
     if provider == "exa":
         conn.execute(
@@ -765,21 +815,34 @@ def create_relay_key(
     tavily_group_id: int | None = None,
     exa_group_ids: list[int] | None = None,
     tavily_group_ids: list[int] | None = None,
+    provider_groups: dict[str, list[int]] | None = None,
     assign_default_groups: bool = True,
 ) -> int:
+    """Create a relay key with provider-group bindings.
+
+    provider_groups (provider -> group ids) is the canonical binding source;
+    explicit entries win over the legacy exa/tavily params. Legacy columns are
+    written only for exa/tavily bindings (set_relay_key_groups side effect).
+    """
+    if provider_groups is None:
+        provider_groups = {}
     assigned_group_id = group_id if group_id is not None else get_default_group_id(conn, "exa")
-    if exa_group_ids is None:
+    if "exa" in provider_groups:
+        normalized_exa_group_ids = normalize_group_ids(provider_groups["exa"])
+    elif exa_group_ids is not None:
+        normalized_exa_group_ids = normalize_group_ids(exa_group_ids)
+    else:
         if assign_default_groups and exa_group_id is None:
             exa_group_id = assigned_group_id
         normalized_exa_group_ids = [] if exa_group_id is None else [exa_group_id]
+    if "tavily" in provider_groups:
+        normalized_tavily_group_ids = normalize_group_ids(provider_groups["tavily"])
+    elif tavily_group_ids is not None:
+        normalized_tavily_group_ids = normalize_group_ids(tavily_group_ids)
     else:
-        normalized_exa_group_ids = normalize_group_ids(exa_group_ids)
-    if tavily_group_ids is None:
         if assign_default_groups and tavily_group_id is None:
             tavily_group_id = get_default_group_id(conn, "tavily")
         normalized_tavily_group_ids = [] if tavily_group_id is None else [tavily_group_id]
-    else:
-        normalized_tavily_group_ids = normalize_group_ids(tavily_group_ids)
     exa_group_id = normalized_exa_group_ids[0] if normalized_exa_group_ids else None
     tavily_group_id = normalized_tavily_group_ids[0] if normalized_tavily_group_ids else None
     assigned_group_id = exa_group_id if group_id is None else group_id
@@ -793,6 +856,10 @@ def create_relay_key(
     key_id = int(cursor.lastrowid)
     set_relay_key_groups(conn, key_id, "exa", normalized_exa_group_ids)
     set_relay_key_groups(conn, key_id, "tavily", normalized_tavily_group_ids)
+    for provider, group_ids in provider_groups.items():
+        if provider in {"exa", "tavily"}:
+            continue
+        set_relay_key_provider_groups(conn, key_id, provider, group_ids)
     return key_id
 
 
@@ -814,9 +881,28 @@ def list_relay_keys(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             """
         ).fetchall()
     ]
+    # One query over the canonical binding table for every key, grouped by provider.
+    group_rows = conn.execute(
+        """
+        SELECT relay_key_groups.relay_key_id, relay_key_groups.provider, groups.*, relay_key_groups.priority
+        FROM relay_key_groups
+        JOIN groups ON groups.id = relay_key_groups.group_id
+        WHERE groups.platform = relay_key_groups.provider
+        ORDER BY relay_key_groups.relay_key_id, relay_key_groups.provider, relay_key_groups.priority ASC, groups.id ASC
+        """
+    ).fetchall()
+    groups_by_key: dict[int, dict[str, list[dict[str, Any]]]] = {}
+    for row in group_rows:
+        provider = str(row["provider"])
+        groups_by_key.setdefault(int(row["relay_key_id"]), {}).setdefault(provider, []).append(dict(row))
     for key in keys:
-        key["exa_groups"] = get_relay_key_provider_groups(conn, int(key["id"]), "exa")
-        key["tavily_groups"] = get_relay_key_provider_groups(conn, int(key["id"]), "tavily")
+        key_id = int(key["id"])
+        by_provider = groups_by_key.get(key_id, {})
+        key["groups_by_provider"] = by_provider
+        # Legacy keys kept for back-compat serialization, populated from the
+        # canonical table when present (falls back to a per-provider query).
+        key["exa_groups"] = by_provider.get("exa") or get_relay_key_provider_groups(conn, key_id, "exa")
+        key["tavily_groups"] = by_provider.get("tavily") or get_relay_key_provider_groups(conn, key_id, "tavily")
     return keys
 
 
@@ -843,9 +929,23 @@ def update_relay_key(
     daily_limit: int | None,
     exa_group_ids: list[int] | None = None,
     tavily_group_ids: list[int] | None = None,
+    provider_groups: dict[str, list[int]] | None = None,
 ) -> None:
-    normalized_exa_group_ids = normalize_group_ids(exa_group_ids) if exa_group_ids is not None else ([] if exa_group_id is None else [exa_group_id])
-    normalized_tavily_group_ids = normalize_group_ids(tavily_group_ids) if tavily_group_ids is not None else ([] if tavily_group_id is None else [tavily_group_id])
+    """Update a relay key; explicit provider_groups entries win over legacy params."""
+    if provider_groups is None:
+        provider_groups = {}
+    if "exa" in provider_groups:
+        normalized_exa_group_ids = normalize_group_ids(provider_groups["exa"])
+    elif exa_group_ids is not None:
+        normalized_exa_group_ids = normalize_group_ids(exa_group_ids)
+    else:
+        normalized_exa_group_ids = [] if exa_group_id is None else [exa_group_id]
+    if "tavily" in provider_groups:
+        normalized_tavily_group_ids = normalize_group_ids(provider_groups["tavily"])
+    elif tavily_group_ids is not None:
+        normalized_tavily_group_ids = normalize_group_ids(tavily_group_ids)
+    else:
+        normalized_tavily_group_ids = [] if tavily_group_id is None else [tavily_group_id]
     exa_group_id = normalized_exa_group_ids[0] if normalized_exa_group_ids else None
     tavily_group_id = normalized_tavily_group_ids[0] if normalized_tavily_group_ids else None
     conn.execute(
@@ -863,6 +963,10 @@ def update_relay_key(
     )
     set_relay_key_groups(conn, key_id, "exa", normalized_exa_group_ids)
     set_relay_key_groups(conn, key_id, "tavily", normalized_tavily_group_ids)
+    for provider, group_ids in provider_groups.items():
+        if provider in {"exa", "tavily"}:
+            continue
+        set_relay_key_provider_groups(conn, key_id, provider, group_ids)
 
 
 def delete_relay_key(conn: sqlite3.Connection, key_id: int) -> None:
@@ -911,15 +1015,21 @@ def record_request_log(
     error_message: str | None,
     provider_group_id: int | None = None,
     provider_group_name: str | None = None,
+    provider_key_id: int | None = None,
 ) -> None:
+    """Record one relayed request.
+
+    provider_key_id is the internal id of the selected upstream key — never
+    the key value itself (logging-guidelines.md: upstream keys are secrets).
+    """
     conn.execute(
         """
         INSERT INTO request_logs (
             provider, endpoint, relay_key_id, status_code, duration_ms,
             request_bytes, response_bytes, provider_group_id, provider_group_name,
-            error_code, error_message
+            error_code, error_message, provider_key_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             provider,
@@ -933,6 +1043,7 @@ def record_request_log(
             provider_group_name,
             error_code,
             error_message[:500] if error_message else None,
+            provider_key_id,
         ),
     )
     conn.commit()

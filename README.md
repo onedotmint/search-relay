@@ -1,19 +1,19 @@
 # Search Relay
 
-Search Relay is a lightweight admin-managed gateway for search APIs such as Exa and Tavily. It lets you manage upstream provider keys, create downstream relay keys, isolate traffic with provider-specific groups, route traffic through optional SOCKS5 proxies, inspect logs, and cache search responses.
+Search Relay is a lightweight admin-managed gateway for search APIs such as Exa, Tavily, Brave, and Jina. It lets you manage upstream provider keys, create downstream relay keys, isolate traffic with provider-specific groups, route traffic through optional SOCKS5 proxies, inspect logs, and cache provider-native responses.
 
 It is designed for teams or individuals who want a simple search API relay with a web admin panel, without building a full user account system.
 
 ## Features
 
 - Single administrator login; no end-user account system.
-- Provider-specific relay endpoints: `/exa/*` and `/tavily/*`.
+- Provider-specific relay endpoints: `/exa/*`, `/tavily/*`, `/brave/*`, and `/jina/*` (GET and POST routes).
 - External relay keys that can bind multiple groups per provider.
 - Group-level load balancing and optional `socks5://` or `socks5h://` upstream proxy settings.
 - Upstream key pools with quota tracking, failure marking, and retry switching.
 - Tavily usage sync for upstream keys.
-- Search response cache management.
-- Request logs with provider, endpoint, relay key, selected group, status, latency, size, and errors.
+- Provider-native response cache for search routes.
+- Request logs with provider, endpoint, relay key, selected group, selected upstream key id, status, latency, size, and errors.
 - React + Ant Design admin console.
 - Python FastAPI backend and SQLite persistence.
 - Docker Compose deployment.
@@ -22,11 +22,15 @@ It is designed for teams or individuals who want a simple search API relay with 
 
 Search Relay separates three concepts:
 
-- **Groups** isolate provider-specific traffic. A group belongs to exactly one provider, such as Exa or Tavily, and may define a default SOCKS5 proxy.
-- **Platform Keys** are real upstream API keys for Exa or Tavily. Each platform key belongs to one matching provider group.
-- **API Keys** are relay keys that you give to downstream clients. A relay key can bind multiple Exa groups and multiple Tavily groups.
+- **Groups** isolate provider-specific traffic. A group belongs to exactly one provider, such as Exa, Tavily, Brave, or Jina, and may define a default SOCKS5 proxy.
+- **Upstream Keys** are real upstream API keys for Exa, Tavily, Brave, or Jina. Each upstream key belongs to one matching provider group.
+- **API Keys** are relay keys that you give to downstream clients. A relay key can bind multiple groups per provider.
 
-When a client calls `/exa/search`, Search Relay authenticates the relay key, chooses an eligible Exa group from that key's bindings, selects an upstream Exa key from that group, and forwards the request to Exa. `/tavily/*` follows the same model for Tavily.
+When a client calls `/exa/search`, Search Relay authenticates the relay key, chooses an eligible Exa group from that key's bindings, selects an upstream Exa key from that group, and forwards the request to Exa. `/tavily/*`, `/brave/*`, and `/jina/*` follow the same model for Tavily, Brave, and Jina.
+
+### Key Pool Purpose & Policy
+
+The upstream key pool exists for credential rotation, project/environment isolation, rate-limit management, and legitimate failover: when one key is rate-limited, exhausted, invalid, or slow, the relay rotates to the next eligible key in the group. It is **not** a mechanism for bypassing provider limits, exceeding free tiers, or amplifying quota — every relayed request consumes a real upstream call, and invalid or quota-exhausted keys are excluded from rotation rather than recycled.
 
 ## Quick Start
 
@@ -80,6 +84,7 @@ print(response.json())
 - [API Guide](docs/api.md)
 - [Admin Guide](docs/admin-guide.md)
 - [Deployment Guide](docs/deployment.md)
+- [Smart Search Integration](docs/smart-search-integration.md)
 - [Security Policy](SECURITY.md)
 - [Contributing](CONTRIBUTING.md)
 
@@ -122,9 +127,18 @@ Production recommendations:
 - Use a long random `APP_SECRET_KEY`.
 - Change the admin password after first login.
 - Put Search Relay behind HTTPS.
-- Do not share upstream Exa or Tavily keys with downstream clients.
+- Do not share upstream Exa, Tavily, Brave, or Jina keys with downstream clients.
 - Rotate any key that may have appeared in logs or chat.
 - Back up the SQLite database before upgrades.
+
+## Caching Boundary
+
+Search Relay caches **provider-native request responses only** — the same
+provider + native endpoint + native request (currently `/exa/search`,
+`/tavily/search`, and `/brave/search`). This is not a retrieval cache:
+normalized candidates, deduped results, RRF-ranked lists, and evidence caches
+belong to the downstream retrieval application (see
+[docs/smart-search-integration.md](docs/smart-search-integration.md)).
 
 ## Roadmap
 

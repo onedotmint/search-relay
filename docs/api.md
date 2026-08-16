@@ -26,16 +26,21 @@ Search Relay keeps provider APIs separate. It does not define a custom aggregate
 
 | Provider | Relay route | Upstream behavior |
 | --- | --- | --- |
-| Exa | `/exa/search` | Forwards to Exa search |
-| Exa | `/exa/contents` | Forwards to Exa contents |
-| Exa | `/exa/answer` | Forwards to Exa answer |
-| Tavily | `/tavily/search` | Forwards to Tavily search |
-| Tavily | `/tavily/extract` | Forwards to Tavily extract |
-| Tavily | `/tavily/crawl` | Forwards to Tavily crawl |
-| Tavily | `/tavily/map` | Forwards to Tavily map |
-| Tavily | `/tavily/research` | Forwards to Tavily research |
+| Exa | `/exa/search` | Forwards to Exa search (POST) |
+| Exa | `/exa/contents` | Forwards to Exa contents (POST) |
+| Exa | `/exa/answer` | Forwards to Exa answer (POST) |
+| Tavily | `/tavily/search` | Forwards to Tavily search (POST) |
+| Tavily | `/tavily/extract` | Forwards to Tavily extract (POST) |
+| Tavily | `/tavily/crawl` | Forwards to Tavily crawl (POST) |
+| Tavily | `/tavily/map` | Forwards to Tavily map (POST) |
+| Tavily | `/tavily/research` | Forwards to Tavily research (POST) |
+| Brave | `/brave/search` | Forwards to Brave search (GET; query params forwarded) |
+| Jina | `/jina/reader` | Forwards to the Jina Reader (GET; target URL as path suffix: `/jina/reader/https://example.com/article`) |
+| Jina | `/jina/rerank` | Forwards to the Jina Reranker (POST; JSON body `model`/`query`/`documents`) |
 
-Use the provider's native request body for each endpoint.
+Use the provider's native request body for each endpoint. GET routes forward
+query parameters as-is (relay credential query parameters are stripped); POST
+routes forward the raw request body after removing any relay `api_key` field.
 
 ## Exa Example
 
@@ -94,9 +99,63 @@ response.raise_for_status()
 print(response.json())
 ```
 
+## Brave Example (GET)
+
+```python
+import requests
+
+response = requests.get(
+    "http://127.0.0.1:8080/brave/search",
+    params={"q": "latest AI search APIs", "count": 10},
+    headers={"Authorization": "Bearer relay_xxx"},
+    timeout=60,
+)
+
+response.raise_for_status()
+print(response.json())
+```
+
+## Jina Reader Example (GET, path-style)
+
+```python
+import requests
+
+response = requests.get(
+    "http://127.0.0.1:8080/jina/reader/https://example.com/article",
+    headers={
+        "Authorization": "Bearer relay_xxx",
+        "X-Return-Format": "markdown",
+    },
+    timeout=60,
+)
+
+response.raise_for_status()
+print(response.text)
+```
+
+## Jina Rerank Example (POST)
+
+```python
+import requests
+
+response = requests.post(
+    "http://127.0.0.1:8080/jina/rerank",
+    headers={"Authorization": "Bearer relay_xxx"},
+    json={
+        "model": "jina-reranker-v2-base-multilingual",
+        "query": "latest AI search APIs",
+        "documents": ["doc1", "doc2"],
+    },
+    timeout=60,
+)
+
+response.raise_for_status()
+print(response.json())
+```
+
 ## Routing And Load Balancing
 
-Each relay API key can bind multiple groups per provider. For an `/exa/*` request, Search Relay only considers Exa groups bound to that relay key. For a `/tavily/*` request, it only considers Tavily groups.
+Each relay API key can bind multiple groups per provider. For an `/exa/*` request, Search Relay only considers Exa groups bound to that relay key. For a `/tavily/*` request, it only considers Tavily groups. The same strict isolation applies to `/brave/*` (Brave groups only) and `/jina/*` (Jina groups only).
 
 Group selection:
 
@@ -123,10 +182,11 @@ If a request is routed through a group with a proxy, the upstream provider reque
 
 ## Search Cache
 
-Search cache applies to successful search responses:
+Search cache applies to successful provider-native responses on cacheable routes:
 
 - `/exa/search`
 - `/tavily/search`
+- `/brave/search`
 
 The cache key includes:
 
@@ -136,7 +196,10 @@ The cache key includes:
 - Sanitized query string.
 - Request body.
 
-This means different groups do not share cache entries.
+This means different groups do not share cache entries. This is a
+provider-native request cache only — retrieval-level caches (normalized
+candidates, deduped results, RRF lists, evidence) belong to the downstream
+retrieval application.
 
 Bypass cache:
 
@@ -171,6 +234,7 @@ Common errors:
 | 403 | `provider_group_unassigned` | Relay key has no group for this provider |
 | 403 | `group_disabled` | All bound groups for this provider are disabled |
 | 404 | `unsupported_route` | Provider endpoint is not supported |
+| 405 | `unsupported_method` | Route exists but does not allow this HTTP method |
 | 429 | `daily_limit_exceeded` | Relay key daily limit is exhausted |
 | 503 | `provider_unavailable` | Provider is disabled or no upstream key is available |
 | 504 | `upstream_timeout` | Upstream request timed out |

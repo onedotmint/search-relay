@@ -49,8 +49,7 @@ import "./styles.css";
 
 const { Header, Content, Sider } = Layout;
 const { Title, Text } = Typography;
-const PROVIDERS = ["exa", "tavily"] as const;
-type ProviderName = typeof PROVIDERS[number];
+type ProviderName = string;
 
 type Provider = {
   name: string;
@@ -109,10 +108,11 @@ type RelayKey = {
   group_name: string | null;
   exa_group_id: number | null;
   exa_group_name: string | null;
-  exa_groups: RelayGroup[];
+  exa_groups?: RelayGroup[];
   tavily_group_id: number | null;
   tavily_group_name: string | null;
-  tavily_groups: RelayGroup[];
+  tavily_groups?: RelayGroup[];
+  provider_groups: Record<string, RelayGroup[]>;
   enabled: boolean;
   daily_limit: number | null;
   key_preview: string;
@@ -197,8 +197,16 @@ function pathToPage(): PageKey {
   return "dashboard";
 }
 
+const PROVIDER_COLORS = ["blue", "green", "purple", "orange", "cyan", "magenta"] as const;
+
+function providerColor(provider: string) {
+  let hash = 0;
+  for (let i = 0; i < provider.length; i++) hash += provider.charCodeAt(i);
+  return PROVIDER_COLORS[hash % PROVIDER_COLORS.length];
+}
+
 function providerTag(provider: ProviderName) {
-  return <Tag color={provider === "exa" ? "blue" : "green"}>{provider}</Tag>;
+  return <Tag color={providerColor(provider)}>{provider}</Tag>;
 }
 
 function statusTag(enabled: boolean) {
@@ -429,15 +437,16 @@ function Groups() {
     return {
       upstream: upstreamKeys.filter((key) => key.group_id === group.id).length,
       external: relayKeys.filter((key) =>
-        key.exa_groups.some((item) => item.id === group.id) ||
-        key.tavily_groups.some((item) => item.id === group.id)
+        Object.values(key.provider_groups ?? {}).some((groups) =>
+          groups.some((item) => item.id === group.id)
+        )
       ).length
     };
   }
 
   const columns: ColumnsType<Group> = [
     { title: "ID", dataIndex: "id", width: 80 },
-    { title: "Platform", render: (_, group) => providerTag(group.platform), width: 120 },
+    { title: "Provider", render: (_, group) => providerTag(group.platform), width: 120 },
     {
       title: "Group",
       render: (_, group) => (
@@ -509,10 +518,10 @@ function Groups() {
         destroyOnHidden
       >
         <Form form={form} layout="vertical" onFinish={save} initialValues={{ platform: "exa", enabled: true }}>
-          <Form.Item name="platform" label="Platform" rules={[{ required: true, message: "Platform is required" }]}>
+          <Form.Item name="platform" label="Provider" rules={[{ required: true, message: "Provider is required" }]}>
             <Select
               disabled={!!editingGroup}
-              options={PROVIDERS.map((provider) => ({ label: provider, value: provider }))}
+              options={providers.map((provider) => ({ label: provider.name, value: provider.name }))}
             />
           </Form.Item>
           <Form.Item name="name" label="Group Name" rules={[{ required: true, message: "Group name is required" }]}>
@@ -647,7 +656,7 @@ function Providers() {
   const upstreamKeys = providers.flatMap((provider) => provider.upstream_keys);
 
   const keyColumns: ColumnsType<ProviderKey> = [
-    { title: "Platform", render: (_, key) => providerTag(key.provider_name), width: 110 },
+    { title: "Provider", render: (_, key) => providerTag(key.provider_name), width: 110 },
     { title: "Group", render: (_, key) => key.group_name ? <Tag>{key.group_name}</Tag> : <Text type="secondary">Unassigned</Text>, width: 160 },
     {
       title: "Key",
@@ -736,12 +745,12 @@ function Providers() {
     <Space direction="vertical" size="large" className="page-stack">
       <div className="page-heading">
         <div>
-          <Title level={2}>Platform Keys</Title>
-          <Text type="secondary">Unified upstream key pool. Platform and group tags decide routing.</Text>
+          <Title level={2}>Upstream Keys</Title>
+          <Text type="secondary">Unified upstream key pool. Provider and group tags decide routing.</Text>
         </div>
         <Space>
           <Tag color="blue">{upstreamKeys.length} upstream keys</Tag>
-          <Button type="primary" icon={<PlusOutlined />} onClick={openCreateProviderKey}>Add Platform Key</Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={openCreateProviderKey}>Add Upstream Key</Button>
         </Space>
       </div>
       <div className="platform-status-grid">
@@ -769,7 +778,7 @@ function Providers() {
           </Card>
         ))}
       </div>
-      <Card title="Platform Key List" className="table-card">
+      <Card title="Upstream Key List" className="table-card">
         <Table
           rowKey={(key) => `${key.provider_name}-${key.id}`}
           loading={loading}
@@ -780,7 +789,7 @@ function Providers() {
         />
       </Card>
       <Modal
-        title={editingKey ? "Edit Platform Key" : "Add Platform Key"}
+        title={editingKey ? "Edit Upstream Key" : "Add Upstream Key"}
         open={modalOpen}
         okText={editingKey ? "Save" : "Add Key"}
         onOk={() => form.submit()}
@@ -796,10 +805,10 @@ function Providers() {
           }}
           initialValues={{ provider_name: "exa", total_quota: 1000, enabled: true }}
         >
-          <Form.Item name="provider_name" label="Platform" rules={[{ required: true, message: "Platform is required" }]}>
+          <Form.Item name="provider_name" label="Provider" rules={[{ required: true, message: "Provider is required" }]}>
             <Select
               disabled={!!editingKey}
-              options={PROVIDERS.map((provider) => ({ label: provider, value: provider }))}
+              options={providers.map((provider) => ({ label: provider.name, value: provider.name }))}
             />
           </Form.Item>
           <Form.Item name="group_id" label="Group" rules={[{ required: true, message: "Group is required" }]}>
@@ -830,14 +839,14 @@ function Providers() {
 function RelayKeys() {
   const [keys, setKeys] = React.useState<RelayKey[]>([]);
   const [groups, setGroups] = React.useState<Group[]>([]);
+  const [providers, setProviders] = React.useState<Provider[]>([]);
   const [createdKey, setCreatedKey] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [modalOpen, setModalOpen] = React.useState(false);
   const [editingKey, setEditingKey] = React.useState<RelayKey | null>(null);
   const [form] = Form.useForm<{
     label: string;
-    exa_group_ids?: number[];
-    tavily_group_ids?: number[];
+    provider_groups: Record<string, number[]>;
     daily_limit?: number;
     enabled?: boolean;
   }>();
@@ -845,12 +854,14 @@ function RelayKeys() {
   async function load() {
     setLoading(true);
     try {
-      const [keyData, groupData] = await Promise.all([
+      const [keyData, groupData, providerData] = await Promise.all([
         api<{ relay_keys: RelayKey[] }>("/api/admin/relay-keys"),
-        api<{ groups: Group[] }>("/api/admin/groups")
+        api<{ groups: Group[] }>("/api/admin/groups"),
+        api<{ providers: Provider[] }>("/api/admin/providers")
       ]);
       setKeys(keyData.relay_keys);
       setGroups(groupData.groups);
+      setProviders(providerData.providers);
     } catch (error) {
       message.error(error instanceof Error ? error.message : "Failed to load API keys");
     } finally {
@@ -864,8 +875,7 @@ function RelayKeys() {
     setEditingKey(null);
     form.setFieldsValue({
       label: "",
-      exa_group_ids: [],
-      tavily_group_ids: [],
+      provider_groups: {},
       daily_limit: undefined,
       enabled: true
     });
@@ -874,10 +884,13 @@ function RelayKeys() {
 
   function openEdit(key: RelayKey) {
     setEditingKey(key);
+    const providerGroups: Record<string, number[]> = {};
+    Object.entries(key.provider_groups ?? {}).forEach(([provider, groups]) => {
+      providerGroups[provider] = groups.map((group) => group.id);
+    });
     form.setFieldsValue({
       label: key.label,
-      exa_group_ids: key.exa_groups.map((group) => group.id),
-      tavily_group_ids: key.tavily_groups.map((group) => group.id),
+      provider_groups: providerGroups,
       daily_limit: key.daily_limit ?? undefined,
       enabled: key.enabled
     });
@@ -886,15 +899,16 @@ function RelayKeys() {
 
   async function save(values: {
     label: string;
-    exa_group_ids?: number[];
-    tavily_group_ids?: number[];
+    provider_groups: Record<string, number[]>;
     daily_limit?: number;
     enabled?: boolean;
   }) {
+    const providerGroups = Object.fromEntries(
+      Object.entries(values.provider_groups ?? {}).filter(([, ids]) => Array.isArray(ids) && ids.length > 0)
+    );
     const payload = {
       label: values.label,
-      exa_group_ids: values.exa_group_ids ?? [],
-      tavily_group_ids: values.tavily_group_ids ?? [],
+      provider_groups: providerGroups,
       daily_limit: values.daily_limit ?? null,
       enabled: values.enabled ?? true
     };
@@ -947,12 +961,17 @@ function RelayKeys() {
     {
       title: "Groups",
       width: 260,
-      render: (_, key) => (
-        <Space direction="vertical" size={2}>
-          <Space size={4}>{providerTag("exa")} {groupTags(key.exa_groups)}</Space>
-          <Space size={4}>{providerTag("tavily")} {groupTags(key.tavily_groups)}</Space>
-        </Space>
-      )
+      render: (_, key) => {
+        const entries = Object.entries(key.provider_groups ?? {});
+        if (!entries.length) return <Text type="secondary">Unassigned</Text>;
+        return (
+          <Space direction="vertical" size={2}>
+            {entries.map(([provider, groups]) => (
+              <Space key={provider} size={4}>{providerTag(provider)} {groupTags(groups)}</Space>
+            ))}
+          </Space>
+        );
+      }
     },
     { title: "Status", render: (_, key) => statusTag(key.enabled), width: 110 },
     { title: "Daily Limit", render: (_, key) => key.daily_limit ?? "Unlimited", width: 120 },
@@ -1013,6 +1032,11 @@ function RelayKeys() {
               <Button size="small" icon={<CopyOutlined />} onClick={() => copyText(createdKey).then(() => message.success("API key copied"))}>
                 Copy API Key
               </Button>
+              <div>
+                <Text type="secondary">Integration: this key is intended for downstream applications such as Smart Search.</Text>
+                <br />
+                <Typography.Text code>SEARCH_RELAY_API_KEY={createdKey}</Typography.Text>
+              </div>
             </Space>
           }
         />
@@ -1032,12 +1056,16 @@ function RelayKeys() {
           <Form.Item name="label" label="Label" rules={[{ required: true, message: "Label is required" }]}>
             <Input placeholder="Label" />
           </Form.Item>
-          <Form.Item name="exa_group_ids" label="Exa Groups">
-            <Select mode="multiple" allowClear placeholder="Exa groups" options={groupOptions(groups, "exa")} />
-          </Form.Item>
-          <Form.Item name="tavily_group_ids" label="Tavily Groups">
-            <Select mode="multiple" allowClear placeholder="Tavily groups" options={groupOptions(groups, "tavily")} />
-          </Form.Item>
+          {providers.map((provider) => (
+            <Form.Item key={provider.name} name={["provider_groups", provider.name]} label={`${provider.name} Groups`}>
+              <Select
+                mode="multiple"
+                allowClear
+                placeholder={`${provider.name} groups`}
+                options={groupOptions(groups, provider.name)}
+              />
+            </Form.Item>
+          ))}
           <Form.Item name="daily_limit" label="Daily Limit">
             <InputNumber min={0} placeholder="Unlimited" className="full-width-input" />
           </Form.Item>
@@ -1121,6 +1149,21 @@ response = requests.post(
 response.raise_for_status()
 print(response.json())`;
 
+  const braveExample = `import requests
+
+BASE_URL = "${baseUrl}"
+RELAY_KEY = "relay_xxx"
+
+response = requests.get(
+    f"{BASE_URL}/brave/search",
+    headers={"Authorization": f"Bearer {RELAY_KEY}"},
+    params={"q": "latest AI search APIs", "count": 3},
+    timeout=60,
+)
+
+response.raise_for_status()
+print(response.json())`;
+
   return (
     <Space direction="vertical" size="large" className="page-stack">
       <div className="page-heading">
@@ -1134,9 +1177,9 @@ print(response.json())`;
       <Card title="核心概念" className="table-card">
         <Space direction="vertical" size="small">
           <Text>客户端只需要使用 API Keys 页面生成的对外 Key，例如 <Text code>relay_xxx</Text>。</Text>
-          <Text>管理员在 Platform Keys 页面维护 Exa、Tavily 等上游真实 Key，并通过分组隔离不同池子。</Text>
-          <Text>一个对外 Key 可以分别绑定一个 Exa 分组和一个 Tavily 分组；访问不同平台时只会使用对应分组内的上游 Key。</Text>
-          <Text type="secondary">当前没有统一聚合 <Text code>/search</Text> 路由，请分别使用 <Text code>/exa/*</Text> 和 <Text code>/tavily/*</Text>。</Text>
+          <Text>管理员在 Upstream Keys 页面维护 Brave、Exa、Tavily、Jina 等上游真实 Key，并通过分组隔离不同池子。</Text>
+          <Text>一个对外 Key 可以按平台分别绑定分组（Brave、Exa、Tavily、Jina）；访问不同平台时只会使用对应分组内的上游 Key。</Text>
+          <Text type="secondary">当前没有统一聚合 <Text code>/search</Text> 路由，请分别使用 <Text code>/brave/*</Text>、<Text code>/exa/*</Text>、<Text code>/tavily/*</Text>、<Text code>/jina/*</Text>。</Text>
         </Space>
       </Card>
 
@@ -1155,6 +1198,8 @@ print(response.json())`;
         <Space direction="vertical" size="small">
           <Text>访问 <Text code>/exa/search</Text> 时，只会从该对外 Key 绑定的 Exa 分组中选择上游 Key。</Text>
           <Text>访问 <Text code>/tavily/search</Text> 时，只会从该对外 Key 绑定的 Tavily 分组中选择上游 Key。</Text>
+          <Text>访问 <Text code>/brave/search</Text>（GET）时，只会从该对外 Key 绑定的 Brave 分组中选择上游 Key。</Text>
+          <Text>访问 <Text code>/jina/reader</Text>、<Text code>/jina/rerank</Text> 时，只会从该对外 Key 绑定的 Jina 分组中选择上游 Key。</Text>
           <Text>同一分组内优先使用启用、有效、剩余额度最多的上游 Key。</Text>
           <Text>如果某个上游 Key 返回 <Text code>401</Text>、额度耗尽、限流或临时 <Text code>5xx</Text>，中转服务会自动尝试同组下一个 Key。</Text>
           <Text type="secondary">如果对外 Key 没有绑定对应平台分组，会返回 <Text code>provider_group_unassigned</Text>。</Text>
@@ -1171,6 +1216,9 @@ print(response.json())`;
           <Text code>/tavily/crawl</Text>
           <Text code>/tavily/map</Text>
           <Text code>/tavily/research</Text>
+          <Text code>/brave/search</Text>
+          <Text code>/jina/reader</Text>
+          <Text code>/jina/rerank</Text>
         </Space>
       </Card>
 
@@ -1186,6 +1234,15 @@ print(response.json())`;
         </Typography.Paragraph>
       </Card>
 
+      <Card title="Python 示例：Brave Search (GET)" className="table-card">
+        <Space direction="vertical" size="small">
+          <Text>Brave 使用 GET 请求，参数通过 query 传递；中转服务同样使用 Bearer 对外 Key 认证。</Text>
+          <Typography.Paragraph copyable>
+            <pre>{braveExample}</pre>
+          </Typography.Paragraph>
+        </Space>
+      </Card>
+
       <Card title="Python 示例：body 传入 API Key" className="table-card">
         <Space direction="vertical" size="small">
           <Text>这种方式用于兼容不能设置 Header 的客户端。中转服务会在转发给上游前移除 <Text code>api_key</Text> / <Text code>apiKey</Text>。</Text>
@@ -1197,7 +1254,7 @@ print(response.json())`;
 
       <Card title="搜索缓存" className="table-card">
         <Space direction="vertical" size="small">
-          <Text>缓存仅用于成功的 <Text code>/exa/search</Text> 和 <Text code>/tavily/search</Text> 响应。</Text>
+          <Text>缓存仅用于成功的 <Text code>/exa/search</Text>、<Text code>/tavily/search</Text> 和 <Text code>/brave/search</Text> 响应。</Text>
           <Text>缓存按平台、端点、对外 Key 绑定的平台分组、清洗后的 query 参数和请求体隔离。</Text>
           <Text>响应头 <Text code>X-Search-Relay-Cache: hit</Text> 表示命中缓存，<Text code>miss</Text> 表示访问了上游并写入缓存。</Text>
           <Typography.Paragraph copyable>
@@ -1213,6 +1270,7 @@ print(response.json())`;
           <Text><Text code>provider_group_unassigned</Text>：该 Key 未绑定对应平台分组。</Text>
           <Text><Text code>group_disabled</Text>：绑定的平台分组已禁用。</Text>
           <Text><Text code>unsupported_route</Text>：平台不支持该端点。</Text>
+          <Text><Text code>unsupported_method</Text>：该端点不支持当前 HTTP 方法（例如对仅支持 GET 的端点使用 POST）。</Text>
           <Text><Text code>daily_limit_exceeded</Text>：对外 API Key 达到每日限制。</Text>
           <Text><Text code>provider_unavailable</Text>：平台未启用或分组内没有可用上游 Key。</Text>
           <Text><Text code>upstream_timeout</Text>：上游请求超时。</Text>
@@ -1226,6 +1284,7 @@ function CacheCenter() {
   const [settings, setSettings] = React.useState<CacheSettings | null>(null);
   const [stats, setStats] = React.useState<CacheStats | null>(null);
   const [entries, setEntries] = React.useState<CacheEntry[]>([]);
+  const [providers, setProviders] = React.useState<Provider[]>([]);
   const [total, setTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(false);
   const [providerFilter, setProviderFilter] = React.useState<ProviderName | undefined>();
@@ -1243,14 +1302,16 @@ function CacheCenter() {
         offset: String(offset)
       });
       if (providerFilter) params.set("provider", providerFilter);
-      const [statsData, entriesData] = await Promise.all([
+      const [statsData, entriesData, providerData] = await Promise.all([
         api<{ settings: CacheSettings; stats: CacheStats }>("/api/admin/cache/stats"),
-        api<{ entries: CacheEntry[]; total: number }>(`/api/admin/cache?${params.toString()}`)
+        api<{ entries: CacheEntry[]; total: number }>(`/api/admin/cache?${params.toString()}`),
+        api<{ providers: Provider[] }>("/api/admin/providers")
       ]);
       setSettings(statsData.settings);
       setStats(statsData.stats);
       setEntries(entriesData.entries);
       setTotal(entriesData.total);
+      setProviders(providerData.providers);
       form.setFieldsValue(statsData.settings);
     } catch (error) {
       message.error(error instanceof Error ? error.message : "Failed to load cache");
@@ -1390,7 +1451,7 @@ function CacheCenter() {
             allowClear
             placeholder="Provider"
             value={providerFilter}
-            options={PROVIDERS.map((provider) => ({ label: provider, value: provider }))}
+            options={providers.map((provider) => ({ label: provider.name, value: provider.name }))}
             onChange={(value) => { setProviderFilter(value); setOffset(0); }}
             style={{ width: 150 }}
           />
@@ -1433,6 +1494,7 @@ function Logs() {
   const [logs, setLogs] = React.useState<RequestLog[]>([]);
   const [total, setTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(false);
+  const [providers, setProviders] = React.useState<Provider[]>([]);
   const [providerFilter, setProviderFilter] = React.useState<ProviderName | undefined>();
   const [statusFilter, setStatusFilter] = React.useState("all");
   const [search, setSearch] = React.useState("");
@@ -1458,9 +1520,13 @@ function Logs() {
       if (endpoint.trim()) params.set("endpoint", endpoint.trim());
       if (createdFrom.trim()) params.set("created_from", createdFrom.trim());
       if (createdTo.trim()) params.set("created_to", createdTo.trim());
-      const data = await api<{ logs: RequestLog[]; total: number }>(`/api/admin/logs?${params.toString()}`);
+      const [data, providerData] = await Promise.all([
+        api<{ logs: RequestLog[]; total: number }>(`/api/admin/logs?${params.toString()}`),
+        api<{ providers: Provider[] }>("/api/admin/providers")
+      ]);
       setLogs(data.logs);
       setTotal(data.total);
+      setProviders(providerData.providers);
     } catch (error) {
       message.error(error instanceof Error ? error.message : "Failed to load logs");
     } finally {
@@ -1547,7 +1613,7 @@ function Logs() {
             allowClear
             placeholder="Provider"
             value={providerFilter}
-            options={PROVIDERS.map((provider) => ({ label: provider, value: provider }))}
+            options={providers.map((provider) => ({ label: provider.name, value: provider.name }))}
             onChange={(value) => setProviderFilter(value)}
             style={{ width: 150 }}
           />
@@ -1674,6 +1740,9 @@ function Settings() {
           <Text code>/tavily/crawl</Text>
           <Text code>/tavily/map</Text>
           <Text code>/tavily/research</Text>
+          <Text code>/brave/search</Text>
+          <Text code>/jina/reader</Text>
+          <Text code>/jina/rerank</Text>
         </Space>
       </Card>
     </Space>
@@ -1713,7 +1782,7 @@ function AdminApp() {
   const menuItems = [
     { key: "dashboard", icon: <DashboardOutlined />, label: "Dashboard" },
     { key: "groups", icon: <ApartmentOutlined />, label: "Groups" },
-    { key: "providers", icon: <ApiOutlined />, label: "Platform Keys" },
+    { key: "providers", icon: <ApiOutlined />, label: "Upstream Keys" },
     { key: "relay-keys", icon: <KeyOutlined />, label: "API Keys" },
     { key: "docs", icon: <BookOutlined />, label: "Docs" },
     { key: "cache", icon: <DatabaseOutlined />, label: "Cache" },

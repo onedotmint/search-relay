@@ -6,7 +6,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
-from app.providers import ProviderRouteError, build_upstream_request
+from app.providers import ProviderRouteError, build_upstream_request, resolve_route
 from app.repositories import (
     count_group_provider_requests_today,
     count_key_requests_today,
@@ -28,6 +28,64 @@ from app.security import verify_secret
 
 
 router = APIRouter()
+
+
+# Conservative allowlist for upstream response-header passthrough. Content-type
+# is handled separately via Response(media_type=...).
+_HOP_BY_HOP_HEADERS = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "transfer-encoding",
+        "upgrade",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+    }
+)
+_FORBIDDEN_HEADER_SUBSTRINGS = ("key", "token", "secret")
+_ALLOWLISTED_HEADERS = frozenset({"cache-control", "etag", "last-modified"})
+# Neutral client headers forwarded to the upstream as-is (case-insensitive).
+# Never includes authorization or anything credential-looking — upstream auth
+# headers built from the registry always win.
+_FORWARDABLE_CLIENT_HEADERS = frozenset({"accept", "x-return-format", "x-respond-with"})
+
+
+def forwardable_client_headers(request: Request, upstream_headers: dict[str, str]) -> dict[str, str]:
+    """Merge a conservative allowlist of client headers into the upstream headers.
+
+    Only content-negotiation headers (accept, x-return-format, x-respond-with)
+    are copied from the client request; credentials, hop-by-hop headers, and
+    anything whose name suggests a key/token/secret are never forwarded. The
+    registry-built upstream auth headers always win over any client value.
+    """
+    merged = dict(upstream_headers)
+    for name, value in request.headers.items():
+        if name.lower() in _FORWARDABLE_CLIENT_HEADERS:
+            merged[name] = value
+    return merged
+
+
+def passthrough_headers(upstream_headers) -> dict[str, str]:
+    """Copy a conservative allowlist of safe upstream headers to the relay response.
+
+    Content-type is handled by the caller via Response(media_type=...). Never
+    forwards hop-by-hop/connection-specific headers, credentials, or any
+    header whose name suggests it carries a key/token/secret.
+    """
+    forwarded: dict[str, str] = {}
+    for name, value in upstream_headers.items():
+        lowered = name.lower()
+        if lowered in _HOP_BY_HOP_HEADERS:
+            continue
+        if lowered in {"set-cookie", "authorization", "www-authenticate"}:
+            continue
+        if any(part in lowered for part in _FORBIDDEN_HEADER_SUBSTRINGS):
+            continue
+        if lowered.startswith("x-ratelimit-") or lowered in _ALLOWLISTED_HEADERS:
+            forwarded[name] = value
+    return forwarded
 
 
 def relay_error(status_code: int, code: str, message: str) -> JSONResponse:
@@ -159,6 +217,32 @@ async def forward_request(request: Request, provider: str, endpoint: str) -> Res
     if daily_limit is not None and count_key_requests_today(conn, relay_key_id) >= int(daily_limit):
         return relay_error(429, "daily_limit_exceeded", "Relay key daily limit exceeded")
 
+    # endpoint may carry a path suffix for path-style routes (e.g.
+    # "reader/https://example.com/article") — split it off before resolving.
+    route_name, sep, path_suffix = endpoint.partition("/")
+    if sep:
+        path_suffix = path_suffix.strip("/")
+    try:
+        route = resolve_route(provider, route_name)
+    except ProviderRouteError:
+        return relay_error(404, "unsupported_route", "Unsupported provider route")
+    if route.path_style == "segment" and path_suffix:
+        return relay_error(404, "unsupported_route", "Unsupported provider route")
+    if route.path_style == "path" and not path_suffix:
+        return relay_error(404, "unsupported_route", "Unsupported provider route")
+    if request.method not in route.methods:
+        return relay_error(405, "unsupported_method", "Unsupported HTTP method for this route")
+
+    method = request.method
+    if method == "GET":
+        params = parse_qsl(raw_query, keep_blank_values=True)
+        content = None
+        upstream_query = ""
+    else:
+        params = None
+        content = body
+        upstream_query = raw_query
+
     provider_groups = get_relay_key_provider_groups(conn, relay_key_id, provider)
     if not provider_groups:
         return relay_error(403, "provider_group_unassigned", "Relay key is not assigned to this provider")
@@ -180,11 +264,6 @@ async def forward_request(request: Request, provider: str, endpoint: str) -> Res
             "Provider is disabled or missing an API key",
         )
         return relay_error(503, "provider_unavailable", "Provider is disabled or missing an API key")
-
-    try:
-        build_upstream_request(provider, endpoint, "", raw_query)
-    except ProviderRouteError:
-        return relay_error(404, "unsupported_route", "Unsupported provider route")
 
     _, group_candidates = build_group_candidates(conn, relay_key_id, provider)
     if not group_candidates:
@@ -210,14 +289,16 @@ async def forward_request(request: Request, provider: str, endpoint: str) -> Res
     )
     last_retry_response: httpx.Response | None = None
     last_retry_group: dict | None = None
+    last_retry_key_id: int | None = None
     last_timeout_group: dict | None = None
+    last_timeout_key_id: int | None = None
     last_timeout = False
 
     for group_candidate in group_candidates:
         group = group_candidate["group"]
         cache_key = None
-        if endpoint == "search" and cache_settings["enabled"] and not no_cache:
-            cache_key = build_search_cache_key(provider, endpoint, int(group["id"]), raw_query, body)
+        if route.cacheable and cache_settings["enabled"] and not no_cache:
+            cache_key = build_search_cache_key(provider, route_name, int(group["id"]), raw_query, body)
             cached = get_search_cache(conn, cache_key)
             if cached is not None:
                 response_body = str(cached["response_body"]).encode("utf-8")
@@ -245,12 +326,26 @@ async def forward_request(request: Request, provider: str, endpoint: str) -> Res
         async with httpx.AsyncClient(**http_client_kwargs(request, group)) as client:
             for provider_key in group_candidate["keys"]:
                 provider_key_id = int(provider_key["id"])
-                upstream = build_upstream_request(provider, endpoint, provider_key["api_key"], raw_query)
+                upstream = build_upstream_request(
+                    provider,
+                    route_name,
+                    provider_key["api_key"],
+                    upstream_query,
+                    method=method,
+                    path_suffix=path_suffix,
+                )
+                headers = forwardable_client_headers(request, upstream.headers)
                 try:
-                    upstream_response = await client.post(upstream.url, content=body, headers=upstream.headers)
+                    if method == "GET":
+                        upstream_response = await client.request(
+                            method, upstream.url, params=params, content=content, headers=headers
+                        )
+                    else:
+                        upstream_response = await client.post(upstream.url, content=content, headers=headers)
                 except httpx.TimeoutException:
                     last_timeout = True
                     last_timeout_group = group
+                    last_timeout_key_id = provider_key_id
                     mark_provider_api_key_error(conn, provider_key_id, 504, "Upstream request timed out")
                     continue
 
@@ -264,6 +359,7 @@ async def forward_request(request: Request, provider: str, endpoint: str) -> Res
                     mark_provider_api_key_error(conn, provider_key_id, upstream_response.status_code, upstream_response.text)
                     last_retry_response = upstream_response
                     last_retry_group = group
+                    last_retry_key_id = provider_key_id
                     continue
 
                 if upstream_response.status_code < 400:
@@ -296,12 +392,16 @@ async def forward_request(request: Request, provider: str, endpoint: str) -> Res
                     None if upstream_response.status_code < 400 else response_body[:500].decode("utf-8", "replace"),
                     provider_group_id=int(group["id"]),
                     provider_group_name=str(group["name"]),
+                    provider_key_id=provider_key_id,
                 )
                 return Response(
                     content=response_body,
                     status_code=upstream_response.status_code,
                     media_type=content_type,
-                    headers={"X-Search-Relay-Cache": "miss"} if cache_key else None,
+                    headers={
+                        **passthrough_headers(upstream_response.headers),
+                        **({"X-Search-Relay-Cache": "miss"} if cache_key else {}),
+                    },
                 )
 
     if last_retry_response is not None:
@@ -319,11 +419,13 @@ async def forward_request(request: Request, provider: str, endpoint: str) -> Res
             response_body[:500].decode("utf-8", "replace"),
             provider_group_id=int(last_retry_group["id"]) if last_retry_group else None,
             provider_group_name=str(last_retry_group["name"]) if last_retry_group else None,
+            provider_key_id=last_retry_key_id,
         )
         return Response(
             content=response_body,
             status_code=last_retry_response.status_code,
             media_type=last_retry_response.headers.get("content-type", "application/json"),
+            headers=passthrough_headers(last_retry_response.headers),
         )
 
     status_code = 504 if last_timeout else 503
@@ -342,15 +444,11 @@ async def forward_request(request: Request, provider: str, endpoint: str) -> Res
         error_message,
         provider_group_id=int(last_timeout_group["id"]) if last_timeout_group else None,
         provider_group_name=str(last_timeout_group["name"]) if last_timeout_group else None,
+        provider_key_id=last_timeout_key_id,
     )
     return relay_error(status_code, error_code, error_message)
 
 
-@router.post("/exa/{endpoint}")
-async def exa_relay(endpoint: str, request: Request) -> Response:
-    return await forward_request(request, "exa", endpoint)
-
-
-@router.post("/tavily/{endpoint}")
-async def tavily_relay(endpoint: str, request: Request) -> Response:
-    return await forward_request(request, "tavily", endpoint)
+@router.api_route("/{provider}/{endpoint:path}", methods=["GET", "POST"])
+async def provider_relay(provider: str, endpoint: str, request: Request) -> Response:
+    return await forward_request(request, provider, endpoint)

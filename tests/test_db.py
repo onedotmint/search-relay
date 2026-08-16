@@ -1,4 +1,5 @@
 from app.db import connect, init_db
+from app.providers import PROVIDERS
 from app.repositories import (
     create_group,
     create_provider,
@@ -9,6 +10,7 @@ from app.repositories import (
     enforce_search_cache_max_rows,
     get_candidate_provider_api_keys,
     get_cache_settings,
+    get_default_group_id,
     get_provider,
     get_relay_key_provider_groups,
     get_request_log,
@@ -40,7 +42,7 @@ def test_init_db_creates_default_providers(tmp_path):
         init_db(conn)
         providers = list_providers(conn)
 
-    assert [provider["name"] for provider in providers] == ["exa", "tavily"]
+    assert [provider["name"] for provider in providers] == ["brave", "exa", "jina", "tavily"]
     assert all(provider["enabled"] == 0 for provider in providers)
 
 
@@ -53,7 +55,60 @@ def test_init_db_creates_provider_default_groups(tmp_path):
     assert {(group["name"], group["platform"]) for group in groups} == {
         ("default", "exa"),
         ("tavily-default", "tavily"),
+        ("brave-default", "brave"),
+        ("jina-default", "jina"),
     }
+
+
+def test_providers_table_matches_registry_after_init(tmp_path):
+    """Every registry provider is seeded into the providers table by init_db.
+
+    The registry (app/providers.py) is the authority for routes/auth; the DB
+    providers table is the authority for enablement/keys. They must stay in
+    sync — this test fails when a registry provider is added without a seed
+    row (or a seed row exists for a provider the registry no longer knows).
+    """
+    db_path = tmp_path / "test.sqlite3"
+    with connect(str(db_path)) as conn:
+        init_db(conn)
+        seeded = {provider["name"] for provider in list_providers(conn)}
+
+    assert seeded == set(PROVIDERS.keys())
+
+
+def test_new_provider_requires_no_relay_keys_schema_change(tmp_path):
+    """Adding a 5th provider must not require relay_keys schema changes.
+
+    Proves the acceptance criterion: a brand-new provider (e.g. "firecrawl")
+    is bound purely through relay_key_groups — no brave/jina-style group_id
+    columns, no new columns at all.
+    """
+    db_path = tmp_path / "test.sqlite3"
+    with connect(str(db_path)) as conn:
+        init_db(conn)
+        columns_before = {
+            row["name"] for row in conn.execute("PRAGMA table_info(relay_keys)").fetchall()
+        }
+
+        create_provider(conn, "firecrawl", api_key="", enabled=False)
+        firecrawl_group_id = create_group(
+            conn, name="firecrawl-pool", platform="firecrawl", enabled=True
+        )
+        key_id = create_relay_key(
+            conn,
+            label="firecrawl-client",
+            key_hash="hash-firecrawl",
+            daily_limit=None,
+            provider_groups={"firecrawl": [firecrawl_group_id]},
+            assign_default_groups=False,
+        )
+        bound = get_relay_key_provider_groups(conn, key_id, "firecrawl")
+        columns_after = {
+            row["name"] for row in conn.execute("PRAGMA table_info(relay_keys)").fetchall()
+        }
+
+    assert [group["id"] for group in bound] == [firecrawl_group_id]
+    assert columns_before == columns_after
 
 
 def test_init_db_migrates_grouped_schema_without_platform_columns(tmp_path):
@@ -133,6 +188,8 @@ def test_init_db_migrates_grouped_schema_without_platform_columns(tmp_path):
     assert {(group["name"], group["platform"]) for group in groups} == {
         ("default", "exa"),
         ("tavily-default", "tavily"),
+        ("brave-default", "brave"),
+        ("jina-default", "jina"),
     }
     assert provider_keys[0]["api_key"] == "legacy-exa-key"
     assert provider_keys[0]["group_name"] == "default"
@@ -217,6 +274,160 @@ def test_group_proxy_and_relay_key_group_mapping_round_trip(tmp_path):
     assert relay_key["tavily_groups"] == []
 
 
+def test_relay_key_groups_supports_arbitrary_provider(tmp_path):
+    db_path = tmp_path / "test.sqlite3"
+    with connect(str(db_path)) as conn:
+        init_db(conn)
+        brave_group_id = create_group(conn, name="brave-pool", platform="brave", enabled=True)
+        key_id = create_relay_key(
+            conn,
+            label="brave-client",
+            key_hash="hash-brave",
+            daily_limit=None,
+            provider_groups={"brave": [brave_group_id]},
+            assign_default_groups=False,
+        )
+        brave_groups = get_relay_key_provider_groups(conn, key_id, "brave")
+        relay_key = get_relay_key_by_hash(conn, "hash-brave")
+
+    assert [group["id"] for group in brave_groups] == [brave_group_id]
+    # No legacy relay_keys columns are written for a non-exa/tavily provider.
+    assert relay_key["group_id"] is None
+    assert relay_key["exa_group_id"] is None
+    assert relay_key["tavily_group_id"] is None
+
+
+def test_relay_key_groups_supports_brave(tmp_path):
+    db_path = tmp_path / "test.sqlite3"
+    with connect(str(db_path)) as conn:
+        init_db(conn)
+        # Seeded default group for the brave provider resolves without creating one.
+        brave_default = get_default_group_id(conn, "brave")
+        key_id = create_relay_key(
+            conn,
+            label="brave-client",
+            key_hash="hash-brave-seeded",
+            daily_limit=None,
+            provider_groups={"brave": [brave_default]},
+            assign_default_groups=False,
+        )
+        brave_groups = get_relay_key_provider_groups(conn, key_id, "brave")
+        relay_key = get_relay_key_by_hash(conn, "hash-brave-seeded")
+
+    assert [group["id"] for group in brave_groups] == [brave_default]
+    assert [group["name"] for group in brave_groups] == ["brave-default"]
+    # Brave goes through relay_key_groups only — no new relay_keys columns.
+    assert relay_key["group_id"] is None
+    assert relay_key["exa_group_id"] is None
+    assert relay_key["tavily_group_id"] is None
+
+
+def test_relay_key_groups_supports_jina(tmp_path):
+    db_path = tmp_path / "test.sqlite3"
+    with connect(str(db_path)) as conn:
+        init_db(conn)
+        # Seeded default group for the jina provider resolves without creating one.
+        jina_default = get_default_group_id(conn, "jina")
+        key_id = create_relay_key(
+            conn,
+            label="jina-client",
+            key_hash="hash-jina-seeded",
+            daily_limit=None,
+            provider_groups={"jina": [jina_default]},
+            assign_default_groups=False,
+        )
+        jina_groups = get_relay_key_provider_groups(conn, key_id, "jina")
+        relay_key = get_relay_key_by_hash(conn, "hash-jina-seeded")
+
+    assert [group["id"] for group in jina_groups] == [jina_default]
+    assert [group["name"] for group in jina_groups] == ["jina-default"]
+    # Jina goes through relay_key_groups only — no new relay_keys columns.
+    assert relay_key["group_id"] is None
+    assert relay_key["exa_group_id"] is None
+    assert relay_key["tavily_group_id"] is None
+
+
+def test_create_relay_key_with_provider_groups_dict(tmp_path):
+    db_path = tmp_path / "test.sqlite3"
+    with connect(str(db_path)) as conn:
+        init_db(conn)
+        exa_group_id = create_group(conn, name="exa-pool", platform="exa", enabled=True)
+        tavily_group_id = create_group(conn, name="tavily-pool", platform="tavily", enabled=True)
+        brave_group_id = create_group(conn, name="brave-pool", platform="brave", enabled=True)
+        key_id = create_relay_key(
+            conn,
+            label="multi-provider",
+            key_hash="hash-multi-provider",
+            daily_limit=None,
+            provider_groups={
+                "exa": [exa_group_id],
+                "tavily": [tavily_group_id],
+                "brave": [brave_group_id],
+            },
+            assign_default_groups=False,
+        )
+        exa_groups = get_relay_key_provider_groups(conn, key_id, "exa")
+        tavily_groups = get_relay_key_provider_groups(conn, key_id, "tavily")
+        brave_groups = get_relay_key_provider_groups(conn, key_id, "brave")
+        relay_key = get_relay_key_by_hash(conn, "hash-multi-provider")
+
+    assert [group["id"] for group in exa_groups] == [exa_group_id]
+    assert [group["id"] for group in tavily_groups] == [tavily_group_id]
+    assert [group["id"] for group in brave_groups] == [brave_group_id]
+    # Legacy columns mirrored only for exa/tavily.
+    assert relay_key["group_id"] == exa_group_id
+    assert relay_key["exa_group_id"] == exa_group_id
+    assert relay_key["tavily_group_id"] == tavily_group_id
+
+
+def test_legacy_exa_tavily_data_still_works_after_generalization(tmp_path):
+    db_path = tmp_path / "test.sqlite3"
+    with connect(str(db_path)) as conn:
+        init_db(conn)
+        exa_group_id = create_group(conn, name="exa-legacy", platform="exa", enabled=True)
+        tavily_group_id = create_group(conn, name="tavily-legacy", platform="tavily", enabled=True)
+        key_id = create_relay_key(
+            conn,
+            label="legacy-client",
+            key_hash="hash-legacy",
+            daily_limit=None,
+            exa_group_id=exa_group_id,
+            tavily_group_id=tavily_group_id,
+            assign_default_groups=False,
+        )
+        exa_groups = get_relay_key_provider_groups(conn, key_id, "exa")
+        tavily_groups = get_relay_key_provider_groups(conn, key_id, "tavily")
+        relay_key = get_relay_key_by_hash(conn, "hash-legacy")
+
+    assert [group["id"] for group in exa_groups] == [exa_group_id]
+    assert [group["id"] for group in tavily_groups] == [tavily_group_id]
+    assert relay_key["exa_group_id"] == exa_group_id
+    assert relay_key["tavily_group_id"] == tavily_group_id
+
+
+def test_list_relay_keys_exposes_groups_by_provider(tmp_path):
+    db_path = tmp_path / "test.sqlite3"
+    with connect(str(db_path)) as conn:
+        init_db(conn)
+        exa_group_id = create_group(conn, name="exa-list", platform="exa", enabled=True)
+        brave_group_id = create_group(conn, name="brave-list", platform="brave", enabled=True)
+        key_id = create_relay_key(
+            conn,
+            label="listed",
+            key_hash="hash-listed",
+            daily_limit=None,
+            provider_groups={"exa": [exa_group_id], "brave": [brave_group_id]},
+            assign_default_groups=False,
+        )
+        relay_key = next(key for key in list_relay_keys(conn) if key["id"] == key_id)
+
+    assert [group["id"] for group in relay_key["groups_by_provider"]["exa"]] == [exa_group_id]
+    assert [group["id"] for group in relay_key["groups_by_provider"]["brave"]] == [brave_group_id]
+    # Legacy per-provider keys still populated from the canonical table.
+    assert [group["id"] for group in relay_key["exa_groups"]] == [exa_group_id]
+    assert relay_key["tavily_groups"] == []
+
+
 def test_relay_key_and_log_round_trip(tmp_path):
     db_path = tmp_path / "test.sqlite3"
     with connect(str(db_path)) as conn:
@@ -252,6 +463,86 @@ def test_relay_key_and_log_round_trip(tmp_path):
     assert key["tavily_group_id"] is None
     assert logs[0]["provider"] == "exa"
     assert logs[0]["status_code"] == 200
+
+
+def test_request_log_records_internal_upstream_key_id(tmp_path):
+    db_path = tmp_path / "test.sqlite3"
+    with connect(str(db_path)) as conn:
+        init_db(conn)
+        record_request_log(
+            conn,
+            provider="exa",
+            endpoint="/search",
+            relay_key_id=None,
+            status_code=200,
+            duration_ms=10,
+            request_bytes=100,
+            response_bytes=200,
+            error_code=None,
+            error_message=None,
+            provider_group_id=3,
+            provider_group_name="exa-vip",
+            provider_key_id=7,
+        )
+        logs = recent_request_logs(conn, limit=10)
+
+    assert logs[0]["provider_key_id"] == 7
+    assert logs[0]["provider_group_id"] == 3
+
+
+def test_request_log_provider_key_id_defaults_to_null(tmp_path):
+    db_path = tmp_path / "test.sqlite3"
+    with connect(str(db_path)) as conn:
+        init_db(conn)
+        record_request_log(
+            conn,
+            provider="exa",
+            endpoint="/search",
+            relay_key_id=None,
+            status_code=200,
+            duration_ms=10,
+            request_bytes=100,
+            response_bytes=200,
+            error_code=None,
+            error_message=None,
+        )
+        logs = recent_request_logs(conn, limit=10)
+
+    assert logs[0]["provider_key_id"] is None
+
+
+def test_init_db_adds_provider_key_id_column_to_request_logs(tmp_path):
+    # A database created by an older schema (no provider_key_id) must gain the
+    # column additively, with legacy rows backfilled to NULL (never a key value).
+    db_path = tmp_path / "test.sqlite3"
+    with connect(str(db_path)) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE request_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                provider TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                relay_key_id INTEGER,
+                status_code INTEGER NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                request_bytes INTEGER NOT NULL,
+                response_bytes INTEGER NOT NULL,
+                error_code TEXT,
+                error_message TEXT
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO request_logs (provider, endpoint, status_code, duration_ms, request_bytes, response_bytes) "
+            "VALUES ('exa', '/search', 200, 1, 1, 1)"
+        )
+        init_db(conn)
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(request_logs)").fetchall()}
+        row = conn.execute("SELECT provider_key_id FROM request_logs LIMIT 1").fetchone()
+
+    assert "provider_key_id" in columns
+    assert row["provider_key_id"] is None
 
 
 def test_request_logs_can_be_filtered_paginated_and_loaded_by_id(tmp_path):

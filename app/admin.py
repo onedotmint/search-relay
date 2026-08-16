@@ -4,6 +4,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+from app.providers import PROVIDERS
 from app.repositories import (
     clear_search_cache,
     count_request_logs,
@@ -55,7 +56,6 @@ router = APIRouter(prefix="/admin", include_in_schema=False)
 api_router = APIRouter(prefix="/api/admin", include_in_schema=False)
 templates = Jinja2Templates(directory="app/templates")
 SESSION_COOKIE = "admin_session"
-VALID_PROVIDERS = {"exa", "tavily"}
 
 
 class LoginPayload(BaseModel):
@@ -102,6 +102,7 @@ class RelayKeyPayload(BaseModel):
     tavily_group_id: int | None = None
     exa_group_ids: list[int] | None = None
     tavily_group_ids: list[int] | None = None
+    provider_groups: dict[str, list[int]] | None = None
     daily_limit: int | None = Field(default=None, ge=0)
 
 
@@ -111,6 +112,7 @@ class RelayKeyUpdatePayload(BaseModel):
     tavily_group_id: int | None = None
     exa_group_ids: list[int] | None = None
     tavily_group_ids: list[int] | None = None
+    provider_groups: dict[str, list[int]] | None = None
     daily_limit: int | None = Field(default=None, ge=0)
     enabled: bool = True
 
@@ -242,6 +244,11 @@ def provider_public(provider: dict, conn) -> dict:
 
 def relay_key_public(relay_key: dict) -> dict:
     raw_key = relay_key.get("key_value") or ""
+    groups_by_provider = relay_key.get("groups_by_provider") or {}
+    provider_groups = {
+        provider: [relay_group_public(group) for group in groups]
+        for provider, groups in groups_by_provider.items()
+    }
     exa_groups = [relay_group_public(group) for group in relay_key.get("exa_groups", [])]
     tavily_groups = [relay_group_public(group) for group in relay_key.get("tavily_groups", [])]
     exa_first = exa_groups[0] if exa_groups else None
@@ -257,6 +264,7 @@ def relay_key_public(relay_key: dict) -> dict:
         "tavily_group_id": tavily_first["id"] if tavily_first else None,
         "tavily_group_name": tavily_first["name"] if tavily_first else None,
         "tavily_groups": tavily_groups,
+        "provider_groups": provider_groups,
         "enabled": bool(relay_key["enabled"]),
         "daily_limit": relay_key["daily_limit"],
         "key_preview": key_preview(raw_key),
@@ -292,6 +300,38 @@ def validate_matching_groups_or_error(request: Request, group_ids: list[int], pr
         if group_error:
             return group_error
     return None
+
+
+def provider_supported(request: Request, provider_name: str) -> bool:
+    """A provider is manageable if it exists in the DB providers table or the registry."""
+    if provider_name in PROVIDERS:
+        return True
+    return get_provider(request.app.state.db, provider_name) is not None
+
+
+def merged_relay_provider_groups(
+    request: Request,
+    legacy_exa: list[int],
+    legacy_tavily: list[int],
+    provider_groups: dict[str, list[int]] | None,
+) -> tuple[dict[str, list[int]], JSONResponse | None]:
+    """Merge legacy exa/tavily payload group ids with explicit provider_groups.
+
+    Explicit provider_groups entries win over the legacy fields for the same
+    provider; legacy exa/tavily are always included so create/update fully
+    rewrites those bindings (matching legacy behavior). Validates every
+    provider and group before returning.
+    """
+    merged: dict[str, list[int]] = {"exa": legacy_exa, "tavily": legacy_tavily}
+    for provider, group_ids in (provider_groups or {}).items():
+        if not provider_supported(request, provider):
+            return {}, admin_api_error(404, "provider_not_found", "Provider not found")
+        merged[provider] = group_ids_from_payload(group_ids, None)
+    for provider, group_ids in merged.items():
+        error = validate_matching_groups_or_error(request, group_ids, provider)
+        if error:
+            return {}, error
+    return merged, None
 
 
 @router.get("/login", response_class=HTMLResponse)
@@ -357,7 +397,7 @@ def update_provider(
     redirect = require_admin(request)
     if redirect:
         return redirect
-    if provider_name not in {"exa", "tavily"}:
+    if not provider_supported(request, provider_name):
         return RedirectResponse("/admin/providers", status_code=303)
     create_provider(request.app.state.db, provider_name, api_key.strip(), enabled == "on")
     return RedirectResponse("/admin/providers", status_code=303)
@@ -495,7 +535,7 @@ def api_create_group(request: Request, payload: GroupPayload):
         return auth_error
     if not payload.name.strip():
         return admin_api_error(400, "invalid_group", "Group name is required")
-    if payload.platform not in VALID_PROVIDERS:
+    if not provider_supported(request, payload.platform):
         return admin_api_error(400, "invalid_group", "Group platform is not supported")
     socks5_proxy, proxy_error = validate_proxy_or_error(payload.socks5_proxy)
     if proxy_error:
@@ -564,7 +604,7 @@ def api_update_provider(request: Request, provider_name: str, payload: ProviderP
     auth_error = require_api_admin(request)
     if auth_error:
         return auth_error
-    if provider_name not in VALID_PROVIDERS:
+    if not provider_supported(request, provider_name):
         return admin_api_error(404, "provider_not_found", "Provider not found")
     existing = next((provider for provider in list_providers(request.app.state.db) if provider["name"] == provider_name), None)
     api_key = payload.api_key.strip() if payload.api_key is not None else ""
@@ -580,7 +620,7 @@ def api_create_provider_key(request: Request, provider_name: str, payload: Provi
     auth_error = require_api_admin(request)
     if auth_error:
         return auth_error
-    if provider_name not in VALID_PROVIDERS:
+    if not provider_supported(request, provider_name):
         return admin_api_error(404, "provider_not_found", "Provider not found")
     if not payload.label.strip() or not payload.api_key.strip():
         return admin_api_error(400, "invalid_provider_key", "Provider key label and API key are required")
@@ -605,7 +645,7 @@ def api_update_provider_key(request: Request, provider_name: str, key_id: int, p
     auth_error = require_api_admin(request)
     if auth_error:
         return auth_error
-    if provider_name not in VALID_PROVIDERS:
+    if not provider_supported(request, provider_name):
         return admin_api_error(404, "provider_not_found", "Provider not found")
     existing = next(
         (key for key in list_provider_api_keys(request.app.state.db, provider_name) if key["id"] == key_id),
@@ -678,7 +718,7 @@ def api_enable_provider_key(request: Request, provider_name: str, key_id: int):
     auth_error = require_api_admin(request)
     if auth_error:
         return auth_error
-    if provider_name not in VALID_PROVIDERS:
+    if not provider_supported(request, provider_name):
         return admin_api_error(404, "provider_not_found", "Provider not found")
     set_provider_api_key_enabled(request.app.state.db, provider_name, key_id, True)
     return {"ok": True}
@@ -689,7 +729,7 @@ def api_disable_provider_key(request: Request, provider_name: str, key_id: int):
     auth_error = require_api_admin(request)
     if auth_error:
         return auth_error
-    if provider_name not in VALID_PROVIDERS:
+    if not provider_supported(request, provider_name):
         return admin_api_error(404, "provider_not_found", "Provider not found")
     set_provider_api_key_enabled(request.app.state.db, provider_name, key_id, False)
     return {"ok": True}
@@ -700,7 +740,7 @@ def api_delete_provider_key(request: Request, provider_name: str, key_id: int):
     auth_error = require_api_admin(request)
     if auth_error:
         return auth_error
-    if provider_name not in VALID_PROVIDERS:
+    if not provider_supported(request, provider_name):
         return admin_api_error(404, "provider_not_found", "Provider not found")
     delete_provider_api_key(request.app.state.db, provider_name, key_id)
     return {"ok": True}
@@ -725,12 +765,11 @@ def api_create_relay_key(request: Request, payload: RelayKeyPayload):
         return admin_api_error(400, "invalid_relay_key", "Relay key label is required")
     exa_group_ids = group_ids_from_payload(payload.exa_group_ids, payload.exa_group_id)
     tavily_group_ids = group_ids_from_payload(payload.tavily_group_ids, payload.tavily_group_id)
-    exa_group_error = validate_matching_groups_or_error(request, exa_group_ids, "exa")
-    if exa_group_error:
-        return exa_group_error
-    tavily_group_error = validate_matching_groups_or_error(request, tavily_group_ids, "tavily")
-    if tavily_group_error:
-        return tavily_group_error
+    provider_groups, groups_error = merged_relay_provider_groups(
+        request, exa_group_ids, tavily_group_ids, payload.provider_groups
+    )
+    if groups_error:
+        return groups_error
     raw_key = generate_relay_key()
     key_id = create_relay_key(
         request.app.state.db,
@@ -738,8 +777,7 @@ def api_create_relay_key(request: Request, payload: RelayKeyPayload):
         hash_secret(raw_key),
         payload.daily_limit,
         key_value=raw_key,
-        exa_group_ids=exa_group_ids,
-        tavily_group_ids=tavily_group_ids,
+        provider_groups=provider_groups,
         assign_default_groups=False,
     )
     created = next(key for key in list_relay_keys(request.app.state.db) if key["id"] == key_id)
@@ -758,12 +796,11 @@ def api_update_relay_key(request: Request, key_id: int, payload: RelayKeyUpdateP
         return admin_api_error(400, "invalid_relay_key", "Relay key label is required")
     exa_group_ids = group_ids_from_payload(payload.exa_group_ids, payload.exa_group_id)
     tavily_group_ids = group_ids_from_payload(payload.tavily_group_ids, payload.tavily_group_id)
-    exa_group_error = validate_matching_groups_or_error(request, exa_group_ids, "exa")
-    if exa_group_error:
-        return exa_group_error
-    tavily_group_error = validate_matching_groups_or_error(request, tavily_group_ids, "tavily")
-    if tavily_group_error:
-        return tavily_group_error
+    provider_groups, groups_error = merged_relay_provider_groups(
+        request, exa_group_ids, tavily_group_ids, payload.provider_groups
+    )
+    if groups_error:
+        return groups_error
     update_relay_key(
         request.app.state.db,
         key_id,
@@ -772,8 +809,7 @@ def api_update_relay_key(request: Request, key_id: int, payload: RelayKeyUpdateP
         exa_group_ids[0] if exa_group_ids else None,
         tavily_group_ids[0] if tavily_group_ids else None,
         payload.daily_limit,
-        exa_group_ids=exa_group_ids,
-        tavily_group_ids=tavily_group_ids,
+        provider_groups=provider_groups,
     )
     relay_key = next(key for key in list_relay_keys(request.app.state.db) if key["id"] == key_id)
     return {"relay_key": relay_key_public(relay_key)}
@@ -857,7 +893,7 @@ def api_cache_entries(
     auth_error = require_api_admin(request)
     if auth_error:
         return auth_error
-    if provider is not None and provider not in VALID_PROVIDERS:
+    if provider is not None and not provider_supported(request, provider):
         return admin_api_error(400, "invalid_cache_filter", "Provider is not supported")
     if status not in {"all", "active", "expired"}:
         return admin_api_error(400, "invalid_cache_filter", "Cache status is not supported")
@@ -908,7 +944,7 @@ def api_logs(
     auth_error = require_api_admin(request)
     if auth_error:
         return auth_error
-    if provider is not None and provider not in VALID_PROVIDERS:
+    if provider is not None and not provider_supported(request, provider):
         return admin_api_error(400, "invalid_log_filter", "Provider is not supported")
     if status not in {"all", "success", "error", "client_error", "server_error"}:
         return admin_api_error(400, "invalid_log_filter", "Log status is not supported")

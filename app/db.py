@@ -125,6 +125,14 @@ def init_db(conn: sqlite3.Connection) -> None:
         "INSERT OR IGNORE INTO providers (name, base_url, enabled) VALUES (?, ?, 0)",
         ("tavily", "https://api.tavily.com"),
     )
+    conn.execute(
+        "INSERT OR IGNORE INTO providers (name, base_url, enabled) VALUES (?, ?, 0)",
+        ("brave", "https://api.search.brave.com"),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO providers (name, base_url, enabled) VALUES (?, ?, 0)",
+        ("jina", "https://r.jina.ai"),
+    )
     group_columns = {row["name"] for row in conn.execute("PRAGMA table_info(groups)").fetchall()}
     if "platform" not in group_columns:
         conn.execute("ALTER TABLE groups ADD COLUMN platform TEXT")
@@ -139,6 +147,14 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO groups (name, platform, enabled) VALUES (?, ?, 1)",
         ("tavily-default", "tavily"),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO groups (name, platform, enabled) VALUES (?, ?, 1)",
+        ("brave-default", "brave"),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO groups (name, platform, enabled) VALUES (?, ?, 1)",
+        ("jina-default", "jina"),
     )
     relay_columns = {row["name"] for row in conn.execute("PRAGMA table_info(relay_keys)").fetchall()}
     if "group_id" not in relay_columns:
@@ -227,6 +243,9 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE request_logs ADD COLUMN provider_group_id INTEGER")
     if "provider_group_name" not in request_log_columns:
         conn.execute("ALTER TABLE request_logs ADD COLUMN provider_group_name TEXT")
+    if "provider_key_id" not in request_log_columns:
+        # Internal id of the selected upstream key — never the key value.
+        conn.execute("ALTER TABLE request_logs ADD COLUMN provider_key_id INTEGER")
     conn.execute(
         """
         INSERT INTO provider_api_keys (provider_name, group_id, label, api_key, enabled)
